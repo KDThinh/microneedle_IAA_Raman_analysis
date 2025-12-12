@@ -58,10 +58,10 @@ profiles:
       # ========================================================================
       # Baseline Drift Correction (for time-series data - step discontinuity removal)
       # ========================================================================
-      baseline_correction_threshold: 10       # MAD threshold multiplier for jump detection
+      baseline_correction_threshold: 15       # MAD threshold multiplier for jump detection
       baseline_correction_window: 5           # Number of points to average before/after jump for offset calculation
       baseline_correction_smooth_first: true   # If True, smooth signal before jump detection
-      baseline_correction_smooth_window: 11    # Window size for Savitzky-Golay smoothing before jump detection (must be odd)
+      baseline_correction_smooth_window: 5    # Window size for Savitzky-Golay smoothing before jump detection (must be odd)
       baseline_correction_smooth_poly_order: 2 # Polynomial order for Savitzky-Golay smoothing before jump detection
       baseline_correction_correct_smoothed: true # If True, apply correction to smoothed signal; if False, to original signal
       
