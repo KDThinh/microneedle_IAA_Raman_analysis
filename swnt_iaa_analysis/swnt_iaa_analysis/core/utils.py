@@ -3,7 +3,7 @@
 import os
 import numpy as np
 from datetime import timedelta, datetime
-from scipy.signal import medfilt
+from scipy.signal import medfilt, savgol_filter
 
 
 def find_google_drive():
@@ -180,6 +180,249 @@ def remove_spikes_hampel(signal, window_size=5, threshold=3.0, min_spike_length=
             spike_mask[indices_valid[start:end]] = True
     
     return cleaned_signal, spike_mask
+
+
+def smooth_signal(signal, window_size=11, poly_order=2):
+    """
+    Smooth signal using Savitzky-Golay filter.
+    
+    Parameters
+    ----------
+    signal : np.array
+        Array of signal values
+    window_size : int
+        Window size for Savitzky-Golay filter (must be odd, default: 11)
+    poly_order : int
+        Polynomial order for Savitzky-Golay filter (default: 2)
+    
+    Returns
+    -------
+    smoothed : np.array
+        Smoothed signal
+    """
+    # Ensure window_size is odd and valid
+    if window_size % 2 == 0:
+        window_size += 1
+    if window_size > len(signal):
+        window_size = len(signal) if len(signal) % 2 == 1 else len(signal) - 1
+    if window_size < 3:
+        return signal  # Too short to smooth
+    
+    # Ensure poly_order is less than window_size
+    if poly_order >= window_size:
+        poly_order = window_size - 1
+    
+    try:
+        smoothed = savgol_filter(signal, window_size, poly_order)
+        return smoothed
+    except Exception as e:
+        print(f"Warning: Smoothing failed ({e}), using original signal")
+        return signal
+
+
+def correct_baseline_shifts(signal, threshold_multiplier=5, window_size=5,
+                           smooth_first=True, smooth_window=11, smooth_poly_order=2,
+                           correct_smoothed=False, shared_threshold=None,
+                           detect_cumulative_jumps=True, cumulative_window=5):
+    """
+    Detect and correct baseline shifts using MAD-based detection with median offset calculation.
+    
+    This algorithm:
+    1. Calculates derivative with prepend to maintain array length
+    2. Uses MAD to detect outliers (individual jumps)
+    3. Optionally detects cumulative changes over a window (gradual jumps over multiple points)
+    4. Filters consecutive jumps to avoid detecting ramps
+    5. Uses median (not mean) for robust offset calculation
+    6. Applies cumulative corrections
+    
+    Parameters
+    ----------
+    signal : np.array
+        Array of signal values
+    threshold_multiplier : float
+        How many times larger than the noise floor a jump must be to be corrected (default: 5)
+    window_size : int
+        Number of points to average before/after a jump to calculate precise offset (default: 5)
+    smooth_first : bool
+        If True, smooth the signal before jump detection (default: True)
+    smooth_window : int
+        Window size for smoothing if smooth_first=True (default: 11)
+    smooth_poly_order : int
+        Polynomial order for smoothing if smooth_first=True (default: 2)
+    correct_smoothed : bool
+        If True, apply correction to smoothed signal (offset calculated from smoothed).
+        If False, apply correction to original signal (offset calculated from original) (default: False)
+    shared_threshold : float, optional
+        If provided, use this absolute threshold instead of calculating MAD-based threshold.
+        This allows using a shared MAD from a reference signal (default: None)
+    detect_cumulative_jumps : bool
+        If True, also detect gradual jumps over multiple consecutive points (default: True)
+    cumulative_window : int
+        Window size for detecting cumulative changes (default: 5)
+        Detects jumps where total change over N consecutive points exceeds threshold
+    
+    Returns
+    -------
+    corrected : np.array
+        Corrected signal with jumps removed
+    jump_indices : np.array
+        Indices where jumps were detected
+    jump_info : list
+        List of dicts with jump information
+    smoothed_signal : np.array
+        Smoothed version of input signal (if smooth_first=True) or original signal
+    """
+    # Smooth signal first if requested
+    if smooth_first:
+        smoothed_signal = smooth_signal(signal, window_size=smooth_window, poly_order=smooth_poly_order)
+    else:
+        smoothed_signal = np.array(signal).copy()
+    
+    # Calculate the first difference (derivative) with prepend to maintain length
+    diffs = np.diff(smoothed_signal, prepend=smoothed_signal[0])
+    
+    # Define threshold: use shared threshold if provided, otherwise calculate from MAD
+    if shared_threshold is not None:
+        threshold = shared_threshold
+    else:
+        # Estimate the "noise floor" using Median Absolute Deviation (MAD)
+        # This is more robust than Standard Deviation for data with outliers/steps
+        median_diff = np.median(diffs)
+        mad = np.median(np.abs(diffs - median_diff))
+        
+        # Handle edge case where MAD is zero
+        if mad == 0:
+            mad = np.std(diffs) if np.std(diffs) > 0 else 1.0
+        
+        # Define a threshold for what constitutes a "Shift" vs just "Noise"
+        threshold = mad * threshold_multiplier
+    
+    # Find indices where the jump exceeds the threshold (individual jumps)
+    jump_indices_individual = np.where(np.abs(diffs) > threshold)[0]
+    
+    # Optionally detect cumulative changes over a window (gradual jumps)
+    jump_indices_cumulative = np.array([], dtype=int)
+    if detect_cumulative_jumps and len(smoothed_signal) > cumulative_window:
+        cumulative_changes = []
+        cumulative_indices = []
+        
+        for i in range(len(smoothed_signal) - cumulative_window):
+            # Calculate total change over the window
+            total_change = smoothed_signal[i + cumulative_window] - smoothed_signal[i]
+            cumulative_changes.append(total_change)
+            cumulative_indices.append(i + cumulative_window)  # Mark end of window
+        
+        # Calculate MAD for cumulative changes
+        if len(cumulative_changes) > 0:
+            median_cumulative = np.median(cumulative_changes)
+            mad_cumulative = np.median(np.abs(np.array(cumulative_changes) - median_cumulative))
+            
+            if mad_cumulative == 0:
+                mad_cumulative = np.std(cumulative_changes) if np.std(cumulative_changes) > 0 else 1.0
+            
+            cumulative_threshold = mad_cumulative * threshold_multiplier
+            
+            # Find where cumulative change exceeds threshold
+            cumulative_array = np.array(cumulative_changes)
+            cumulative_mask = np.abs(cumulative_array) > cumulative_threshold
+            cumulative_detected = np.where(cumulative_mask)[0]
+            
+            # Only consider cumulative jumps that don't overlap with individual jumps
+            # (to avoid double-detection)
+            for idx in cumulative_detected:
+                jump_idx = cumulative_indices[idx]
+                # Check if this index is far enough from individual jumps
+                if len(jump_indices_individual) == 0 or np.min(np.abs(jump_indices_individual - jump_idx)) > window_size:
+                    jump_indices_cumulative = np.append(jump_indices_cumulative, jump_idx)
+    
+    # Combine both types of jump detections
+    jump_indices_combined = np.unique(np.concatenate([jump_indices_individual, jump_indices_cumulative]))
+    jump_indices_combined = np.sort(jump_indices_combined)
+    
+    # Track which jumps are individual vs cumulative
+    jump_type_map = {}
+    for idx in jump_indices_individual:
+        jump_type_map[idx] = 'individual'
+    for idx in jump_indices_cumulative:
+        jump_type_map[idx] = 'cumulative'
+    
+    # Filter indices: ensure we don't pick up consecutive points (ramp) as multiple jumps
+    # We only take the peak of the jump
+    clean_indices = []
+    clean_jump_types = []
+    if len(jump_indices_combined) > 0:
+        clean_indices.append(jump_indices_combined[0])
+        clean_jump_types.append(jump_type_map.get(jump_indices_combined[0], 'unknown'))
+        for i in range(1, len(jump_indices_combined)):
+            if jump_indices_combined[i] - jump_indices_combined[i-1] > window_size:
+                clean_indices.append(jump_indices_combined[i])
+                clean_jump_types.append(jump_type_map.get(jump_indices_combined[i], 'unknown'))
+    
+    jump_indices = np.array(clean_indices, dtype=int)
+    
+    # Apply Correction
+    # Choose which signal to correct based on correct_smoothed parameter
+    if correct_smoothed:
+        # Correct smoothed signal: use smoothed signal for both offset calculation and correction
+        target_signal = smoothed_signal.copy().astype(float)
+        y_corrected = smoothed_signal.copy().astype(float)
+    else:
+        # Correct original signal: use original signal for offset calculation and correction
+        target_signal = signal.copy().astype(float)
+        y_corrected = signal.copy().astype(float)
+    
+    cumulative_offset = 0.0
+    jump_info = []
+    
+    # Iterate through the detected jumps and "stitch" the segments
+    # Calculate all offsets from original signal first, then apply corrections cumulatively
+    for idx in clean_indices:
+        # Define a small window before and after the jump index
+        start_idx = max(0, idx - window_size)
+        end_idx = min(len(target_signal), idx + window_size)
+        
+        # Calculate the median level before and after the jump using ORIGINAL target signal
+        # This ensures consistent offset calculation regardless of previous corrections
+        # We exclude the jump point from both windows to avoid bias
+        
+        # Before jump: exclude jump point (idx is not included)
+        val_before = np.median(target_signal[start_idx:idx])
+        
+        # After jump: exclude jump point (use idx+1 to start after the jump)
+        # This prevents the jump point itself from biasing the median
+        after_start = idx + 1
+        if after_start < end_idx:
+            val_after = np.median(target_signal[after_start:end_idx])
+        else:
+            # Edge case: if jump is very close to the end, use a smaller window
+            # or use the value right after the jump if available
+            if idx + 1 < len(target_signal):
+                val_after = np.median(target_signal[idx+1:min(len(target_signal), idx+1+window_size)])
+            else:
+                # Last point: use the value before as fallback
+                val_after = val_before
+        
+        # The jump magnitude (calculated from original target signal)
+        step_change = val_after - val_before
+        
+        # We accumulate this offset
+        cumulative_offset += step_change
+        
+        # Apply correction to the target signal
+        # (We subtract the jump to bring the new baseline down/up to the old one)
+        # This is applied cumulatively: each correction affects all subsequent points
+        y_corrected[idx:] -= step_change
+        
+        jump_info.append({
+            'index': idx,
+            'val_before': val_before,
+            'val_after': val_after,
+            'step_change': step_change,
+            'cumulative_offset': cumulative_offset,
+            'jump_type': jump_type_map.get(idx, 'unknown')
+        })
+    
+    return y_corrected, np.array(clean_indices), jump_info, smoothed_signal
 
 
 def parse_light_transition_config(config):

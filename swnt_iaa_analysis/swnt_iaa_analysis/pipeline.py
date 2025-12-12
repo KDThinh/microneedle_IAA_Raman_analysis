@@ -12,12 +12,13 @@ import pandas as pd
 from .core.loader import load_raman_dataset, load_temperature_data
 from .core.preprocessing import apply_savgol_filter
 from .core.baseline import lieberfit
+from .core.utils import remove_spikes_hampel, correct_baseline_shifts
 from .analysis.peaks import find_peak_lorentzian
 from .analysis.ratios import calculate_ratios
 from .analysis.fourier import compute_fourier_transform, compute_diurnal_average
 from .io.config import load_profile_config
 from .io.exporter import export_results, export_fft_results
-from .visualization.plotting import plot_ratio_timeseries
+from .visualization.plotting import plot_ratio_timeseries, plot_signal_correction_comparison, plot_representative_raman_spectrum
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ class RamanPipeline:
         self.temp_dataset = None
         self.results = None
         self.fft_results = None
+        self.representative_spectrum_data = None  # Store spectrum data for representative plot
         
         logger.info(f"Initialized RamanPipeline with profile: {profile_name}")
     
@@ -122,6 +124,16 @@ class RamanPipeline:
         else:
             self.results = self._process_v3()
         
+        # 2a. Apply signal corrections (spike removal and baseline correction) for v4
+        if self.algorithm == 'v4':
+            logger.info("Applying signal corrections (spike removal and baseline correction)...")
+            # Store original data for comparison plots
+            results_original = self.results.copy()
+            self.results, jump_info_dict = self._apply_signal_corrections(self.results)
+            # Plot before/after comparison
+            logger.info("Generating signal correction comparison plots...")
+            plot_signal_correction_comparison(results_original, self.results, self.output_dir, self.config, jump_info_dict)
+        
         # 3. Calculate ratios
         logger.info("Calculating ratios...")
         self.results = calculate_ratios(self.results)
@@ -134,6 +146,11 @@ class RamanPipeline:
         logger.info("Exporting results...")
         self._export_results()
         self._plot_results()
+        
+        # 5a. Plot representative Raman spectrum (for v4)
+        if self.algorithm == 'v4' and self.representative_spectrum_data is not None:
+            logger.info("Generating representative Raman spectrum plot...")
+            plot_representative_raman_spectrum(self.representative_spectrum_data, self.output_dir, self.config)
         
         logger.info("Pipeline execution complete!")
         return self.results
@@ -167,8 +184,19 @@ class RamanPipeline:
         wavenumber_filter = wavenumbers_full >= 250
         wavenumbers = wavenumbers_full[wavenumber_filter]
         
+        # Get skip_scans parameter from config (default: 500)
+        skip_scans = processing_cfg.get('skip_scans', 500)
+        
         summaries = []
         scan_numbers = sorted(raman_df['Scan Number'].unique())
+        
+        # Skip first N scans
+        if skip_scans > 0 and len(scan_numbers) > skip_scans:
+            scan_numbers = scan_numbers[skip_scans:]
+            logger.info(f"Skipped first {skip_scans} scans. Processing {len(scan_numbers)} scans.")
+        
+        # Track if we've stored representative spectrum data
+        representative_stored = False
         
         for scan_number in scan_numbers:
             scan_data = raman_df[raman_df['Scan Number'] == scan_number]
@@ -203,6 +231,20 @@ class RamanPipeline:
             # Find peaks
             raman_peak_850 = find_peak_lorentzian(wavenumbers, corrected_normalized, 800, 900)
             gband_peak_1600 = find_peak_lorentzian(wavenumbers, corrected_normalized, 1550, 1650)
+            
+            # Store representative spectrum data (from first scan after skipping)
+            if not representative_stored:
+                self.representative_spectrum_data = {
+                    'wavenumbers': wavenumbers,
+                    'intensities_normalized': intensities_normalized,
+                    'baseline_normalized': baseline_normalized,
+                    'corrected_normalized': corrected_normalized,
+                    'raman_peak_850': raman_peak_850,
+                    'gband_peak_1600': gband_peak_1600,
+                    'scan_number': scan_number
+                }
+                representative_stored = True
+                logger.info(f"Stored representative spectrum data from scan {scan_number}")
             
             # Calculate fluorescence
             fluo_mask = wavenumbers >= 1250
@@ -258,6 +300,113 @@ class RamanPipeline:
             df.set_index('Datetime', inplace=True)
         
         return df
+    
+    def _apply_signal_corrections(self, df: pd.DataFrame) -> tuple:
+        """
+        Apply spike removal and baseline correction to specified columns.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            DataFrame with normalized intensity columns
+            
+        Returns:
+        --------
+        tuple
+            (DataFrame with corrected columns, dict of jump information per column)
+        """
+        config = self.config
+        processing_cfg = config.get('processing', {})
+        
+        # Get parameters from config with defaults
+        spike_window = processing_cfg.get('spike_window', 5)
+        spike_threshold = processing_cfg.get('spike_threshold', 3.0)
+        baseline_threshold_multiplier = processing_cfg.get('baseline_threshold_multiplier', 5.0)
+        baseline_window_size = processing_cfg.get('baseline_window_size', 5)
+        baseline_smooth_first = processing_cfg.get('baseline_smooth_first', True)
+        baseline_smooth_window = processing_cfg.get('baseline_smooth_window', 11)
+        baseline_smooth_poly_order = processing_cfg.get('baseline_smooth_poly_order', 2)
+        baseline_correct_smoothed = processing_cfg.get('baseline_correct_smoothed', False)
+        baseline_detect_cumulative_jumps = processing_cfg.get('baseline_detect_cumulative_jumps', True)
+        baseline_cumulative_window = processing_cfg.get('baseline_cumulative_window', 5)
+        
+        # Columns to process
+        columns_to_correct = [
+            'Normalized_Fluorescence_Intensity',
+            'Normalized_Gband_Area',
+            'Normalized_Raman_Peak_850_Area'
+        ]
+        
+        df_corrected = df.copy()
+        jump_info_dict = {}  # Store jump information for each column
+        
+        for col in columns_to_correct:
+            if col not in df.columns:
+                logger.warning(f"Column '{col}' not found, skipping...")
+                continue
+            
+            signal = df[col].values
+            
+            # Handle NaN values
+            mask = ~np.isnan(signal)
+            if np.sum(mask) < 3:
+                logger.warning(f"Column '{col}' has insufficient data, skipping...")
+                continue
+            
+            # Extract valid signal
+            signal_valid = signal[mask]
+            valid_indices = np.where(mask)[0]
+            
+            # Step 1: Remove spikes
+            logger.info(f"Removing spikes from {col}...")
+            cleaned_signal, spike_mask = remove_spikes_hampel(
+                signal_valid,
+                window_size=spike_window,
+                threshold=spike_threshold
+            )
+            n_spikes = np.sum(spike_mask)
+            if n_spikes > 0:
+                logger.info(f"  Removed {n_spikes} spike(s) from {col}")
+            
+            # Step 2: Correct baseline shifts
+            logger.info(f"Correcting baseline shifts in {col}...")
+            corrected_signal, jump_indices, jump_info, smoothed_signal = correct_baseline_shifts(
+                cleaned_signal,
+                threshold_multiplier=baseline_threshold_multiplier,
+                window_size=baseline_window_size,
+                smooth_first=baseline_smooth_first,
+                smooth_window=baseline_smooth_window,
+                smooth_poly_order=baseline_smooth_poly_order,
+                correct_smoothed=baseline_correct_smoothed,
+                detect_cumulative_jumps=baseline_detect_cumulative_jumps,
+                cumulative_window=baseline_cumulative_window
+            )
+            
+            if len(jump_indices) > 0:
+                logger.info(f"  Detected {len(jump_indices)} baseline jump(s) in {col}")
+            
+            # Map jump indices back to original DataFrame indices
+            if len(jump_indices) > 0:
+                # jump_indices are relative to valid_indices, need to map to DataFrame index
+                df_jump_indices = valid_indices[jump_indices]
+                jump_info_dict[col] = {
+                    'jump_indices': df_jump_indices,
+                    'jump_info': jump_info
+                }
+            else:
+                jump_info_dict[col] = {
+                    'jump_indices': np.array([], dtype=int),
+                    'jump_info': []
+                }
+            
+            # Map corrected values back to full array (preserving NaN positions)
+            corrected_full = np.full_like(signal, np.nan)
+            corrected_full[mask] = corrected_signal
+            
+            # Update the column in place
+            df_corrected[col] = corrected_full
+        
+        return df_corrected, jump_info_dict
     
     def _process_v3(self) -> pd.DataFrame:
         """
@@ -330,4 +479,15 @@ class RamanPipeline:
         ratio_cols = [col for col in self.results.columns if 'Ratio' in col]
         for col in ratio_cols:
             plot_ratio_timeseries(self.results, col, self.output_dir, self.config)
+        
+        # Plot normalized intensity timeseries (for v4 algorithm)
+        if self.algorithm == 'v4':
+            intensity_cols = [
+                'Normalized_Fluorescence_Intensity',
+                'Normalized_Gband_Intensity',
+                'Normalized_Raman_Peak_850_Intensity'
+            ]
+            for col in intensity_cols:
+                if col in self.results.columns:
+                    plot_ratio_timeseries(self.results, col, self.output_dir, self.config)
 

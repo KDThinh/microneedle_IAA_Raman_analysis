@@ -140,3 +140,251 @@ def plot_ratio_timeseries(df, column_name, output_dir, config, title=None):
     plt.close()
     print(f"Plot saved to: {plot_path}")
 
+
+def plot_signal_correction_comparison(df_original, df_corrected, output_dir, config, jump_info_dict=None):
+    """
+    Plot overlaid time-series showing before and after signal corrections.
+    
+    Creates separate plots for each corrected column showing original vs corrected data.
+    
+    Parameters:
+    -----------
+    df_original : pandas.DataFrame
+        DataFrame with original (uncorrected) data
+    df_corrected : pandas.DataFrame
+        DataFrame with corrected data
+    output_dir : Path
+        Output directory for saving plots
+    config : dict
+        Configuration dictionary
+    jump_info_dict : dict, optional
+        Dictionary mapping column names to jump information dicts with 'jump_indices' key
+    """
+    create_dir_if_needed(str(output_dir))
+    
+    # Columns to plot
+    columns_to_plot = [
+        'Normalized_Fluorescence_Intensity',
+        'Normalized_Gband_Area',
+        'Normalized_Raman_Peak_850_Area'
+    ]
+    
+    # Get light cycle and transitions from config
+    light_cycle = config.get('metadata', {}).get('light_cycle', 'Constant')
+    light_transition = parse_light_transition_config(config)
+    shade_transition = parse_shade_transition_config(config)
+    treatment_events = parse_treatment_events_config(config)
+    
+    # Determine x-axis type
+    x_axis_type = config.get('timeseries_x_axis', 'datetime')
+    if x_axis_type not in ['datetime', 'scan_number']:
+        x_axis_type = 'datetime'
+    
+    for col in columns_to_plot:
+        if col not in df_original.columns or col not in df_corrected.columns:
+            print(f"Warning: Column '{col}' not found in both DataFrames, skipping...")
+            continue
+        
+        fig, ax = plt.subplots(figsize=(14, 6))
+        
+        x_values = df_original.index
+        y_original = df_original[col].values
+        y_corrected = df_corrected[col].values
+        
+        # Plot original data (gray - conventional for raw/original data)
+        ax.plot(x_values, y_original, 'o-', color='gray', alpha=0.7, 
+                linewidth=1.5, markersize=4, label=f'{col} (Original)', zorder=2)
+        
+        # Plot corrected data (blue - conventional for processed/corrected data)
+        ax.plot(x_values, y_corrected, 's-', color='#1f77b4', alpha=0.8, 
+                linewidth=2, markersize=3, label=f'{col} (Corrected)', zorder=3)
+        
+        # Mark jump points on original data if available
+        if jump_info_dict and col in jump_info_dict:
+            jump_data = jump_info_dict[col]
+            jump_indices = jump_data.get('jump_indices', [])
+            if len(jump_indices) > 0:
+                # Convert to numpy array if needed
+                if not isinstance(jump_indices, np.ndarray):
+                    jump_indices = np.array(jump_indices)
+                
+                # Filter indices to valid range
+                valid_jump_indices = jump_indices[(jump_indices >= 0) & (jump_indices < len(x_values))]
+                
+                if len(valid_jump_indices) > 0:
+                    # Convert jump indices to x-axis values
+                    if isinstance(x_values, pd.DatetimeIndex):
+                        jump_x_values = x_values[valid_jump_indices]
+                    else:
+                        jump_x_values = x_values[valid_jump_indices]
+                    
+                    # Get y-values at jump points (use original values, not corrected)
+                    jump_y_values = y_original[valid_jump_indices]
+                    
+                    ax.scatter(jump_x_values, jump_y_values, color='red', marker='x', 
+                             s=100, linewidths=3, zorder=4, label=f'Jump Points (n={len(valid_jump_indices)})')
+        
+        # Add day/night shading if datetime index
+        if pd.api.types.is_datetime64_any_dtype(df_original.index):
+            add_day_night_shading(ax, x_values.min(), x_values.max(), 
+                                light_cycle=light_cycle, light_transition=light_transition)
+            
+            if light_transition:
+                transition_time = light_transition['transition_datetime']
+                if x_values.min() <= transition_time <= x_values.max():
+                    ax.axvline(transition_time, color='red', linestyle='--', 
+                              linewidth=2, alpha=0.7, label='Light transition')
+            
+            if shade_transition:
+                transition_time = shade_transition['transition_datetime']
+                if x_values.min() <= transition_time <= x_values.max():
+                    label_text = 'Shade transition'
+                    if 'ppfd' in shade_transition:
+                        label_text += f" (PPFD: {shade_transition['ppfd']})"
+                    ax.axvline(transition_time, color='purple', linestyle='--', 
+                              linewidth=2, alpha=0.7, label=label_text)
+            
+            if treatment_events:
+                for event in treatment_events:
+                    event_time = event['datetime']
+                    if x_values.min() <= event_time <= x_values.max():
+                        ax.axvline(event_time, color=event['marker_color'], 
+                                 linestyle=event['marker_style'], linewidth=1.5, 
+                                 alpha=0.6, label=event.get('description', event['event_type']))
+            
+            ax.set_xlabel('Date time (MM-DD HH)', fontsize=14)
+            ax.xaxis.set_major_formatter(DateFormatter('%m-%d %H'))
+            ax.xaxis.set_major_locator(DayLocator())
+            fig.autofmt_xdate()
+        else:
+            ax.set_xlabel('Scan Number', fontsize=14)
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f'{int(x)}'))
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
+        
+        ax.set_ylabel(col, fontsize=14)
+        ax.set_title(f'Signal Correction Comparison - {col}\nOriginal vs Corrected (Spike Removal + Baseline Correction)', 
+                    fontsize=15, fontweight='bold')
+        ax.legend(fontsize=11, loc='best')
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='both', labelsize=12)
+        
+        timestamp = datetime.now().strftime("%Y%m%d")
+        plot_filename = f'signal_correction_comparison_{col}_{timestamp}.png'
+        plot_path = Path(output_dir) / plot_filename
+        plt.savefig(str(plot_path), dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Signal correction comparison plot saved to: {plot_path}")
+
+
+def plot_representative_raman_spectrum(spectrum_data, output_dir, config):
+    """
+    Plot representative Raman spectrum showing:
+    - Normalized smoothed spectrum
+    - Lieberfit baseline
+    - Lorentzian fits for G-band and Raman peak at 850 cm⁻¹
+    
+    Parameters:
+    -----------
+    spectrum_data : dict
+        Dictionary containing:
+        - wavenumbers: array of wavenumbers
+        - intensities_normalized: normalized smoothed intensities
+        - baseline_normalized: Lieberfit baseline
+        - corrected_normalized: Lieberfit-corrected spectrum
+        - raman_peak_850: dict with peak info and fit_params
+        - gband_peak_1600: dict with peak info and fit_params
+        - scan_number: scan number
+    output_dir : Path
+        Output directory for saving plot
+    config : dict
+        Configuration dictionary
+    """
+    if spectrum_data is None:
+        return
+    
+    create_dir_if_needed(str(output_dir))
+    
+    # Extract spectrum data
+    wavenumbers = spectrum_data.get('wavenumbers')
+    intensities_normalized = spectrum_data.get('intensities_normalized')
+    baseline_normalized = spectrum_data.get('baseline_normalized')
+    corrected_normalized = spectrum_data.get('corrected_normalized')
+    raman_peak_850 = spectrum_data.get('raman_peak_850')
+    gband_peak_1600 = spectrum_data.get('gband_peak_1600')
+    scan_number = spectrum_data.get('scan_number', 'unknown')
+    
+    if wavenumbers is None or intensities_normalized is None:
+        print("Warning: Missing spectrum data for representative plot")
+        return
+    
+    # Import lorentzian function
+    from ..analysis.peaks import lorentzian
+    
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # Plot normalized smoothed spectrum
+    ax.plot(wavenumbers, intensities_normalized, '-', 
+            color='black', label='Normalized Smoothed Spectrum', alpha=0.7, linewidth=1.5)
+    
+    # Plot Lieberfit baseline
+    if baseline_normalized is not None:
+        ax.plot(wavenumbers, baseline_normalized, '--', 
+                color='red', label='Lieberfit Baseline', alpha=0.8, linewidth=2)
+    
+    # Plot corrected spectrum (after Lieberfit)
+    if corrected_normalized is not None:
+        ax.plot(wavenumbers, corrected_normalized, '-', 
+                color='blue', label='Lieberfit-Corrected Spectrum', alpha=0.6, linewidth=1)
+    
+    # Plot Lorentzian fits for G-band
+    if gband_peak_1600 and gband_peak_1600.get('fit_params') is not None:
+        fit_params = gband_peak_1600['fit_params']
+        center = gband_peak_1600.get('wavenumber', fit_params[1] if len(fit_params) > 1 else np.nan)
+        width = gband_peak_1600.get('width', fit_params[2] if len(fit_params) > 2 else np.nan)
+        
+        if not np.isnan(center) and not np.isnan(width) and width > 0:
+            # Create fine grid around peak for smooth Lorentzian curve
+            peak_range_mask = (wavenumbers >= center - 3*width) & (wavenumbers <= center + 3*width)
+            if np.any(peak_range_mask):
+                wavenumbers_peak = wavenumbers[peak_range_mask]
+                lorentzian_fit = lorentzian(wavenumbers_peak, fit_params[0], fit_params[1], fit_params[2], fit_params[3])
+                ax.plot(wavenumbers_peak, lorentzian_fit, '-', 
+                        color='green', label=f"G-band Lorentzian Fit (Area={gband_peak_1600.get('area', 0):.2f})", 
+                        linewidth=2.5, alpha=0.9)
+                # Mark peak center
+                ax.axvline(center, color='green', linestyle=':', alpha=0.5, linewidth=1.5)
+    
+    # Plot Lorentzian fits for Raman peak 850
+    if raman_peak_850 and raman_peak_850.get('fit_params') is not None:
+        fit_params = raman_peak_850['fit_params']
+        center = raman_peak_850.get('wavenumber', fit_params[1] if len(fit_params) > 1 else np.nan)
+        width = raman_peak_850.get('width', fit_params[2] if len(fit_params) > 2 else np.nan)
+        
+        if not np.isnan(center) and not np.isnan(width) and width > 0:
+            # Create fine grid around peak for smooth Lorentzian curve
+            peak_range_mask = (wavenumbers >= center - 3*width) & (wavenumbers <= center + 3*width)
+            if np.any(peak_range_mask):
+                wavenumbers_peak = wavenumbers[peak_range_mask]
+                lorentzian_fit = lorentzian(wavenumbers_peak, fit_params[0], fit_params[1], fit_params[2], fit_params[3])
+                ax.plot(wavenumbers_peak, lorentzian_fit, '-', 
+                        color='orange', label=f"Raman 850 cm⁻¹ Lorentzian Fit (Area={raman_peak_850.get('area', 0):.2f})", 
+                        linewidth=2.5, alpha=0.9)
+                # Mark peak center
+                ax.axvline(center, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
+    
+    ax.set_xlabel('Wavenumber (cm⁻¹)', fontsize=14)
+    ax.set_ylabel('Normalized Intensity', fontsize=14)
+    ax.set_title(f'Representative Raman Spectrum - Scan {scan_number}\n(Normalized, Lieberfit Baseline, and Lorentzian Fits)', 
+                 fontsize=16, fontweight='bold')
+    ax.legend(fontsize=11, loc='best')
+    ax.grid(True, alpha=0.3)
+    ax.tick_params(axis='both', labelsize=12)
+    ax.set_xlim(250, max(wavenumbers))
+    
+    timestamp = datetime.now().strftime("%Y%m%d")
+    plot_filename = f'representative_raman_spectrum_scan_{scan_number}_{timestamp}.png'
+    plot_path = Path(output_dir) / plot_filename
+    plt.savefig(str(plot_path), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Representative Raman spectrum plot saved to: {plot_path}")
+

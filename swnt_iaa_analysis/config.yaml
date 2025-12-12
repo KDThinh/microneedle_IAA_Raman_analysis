@@ -12,7 +12,7 @@ profiles:
       # Spectroscopy/Excitation Parameters
       # ========================================================================
       excitation_nm: 830  # Laser excitation wavelength (nm) - The laser you ACTUALLY used
-      recorded_excitation_nm: 840  # The laser the file metadata implies (raw text files usually come from a device set to 785nm)
+      recorded_excitation_nm: 830  # The laser the file metadata implies (raw text files usually come from a device set to 785nm)
       
       # ========================================================================
       # Emission Wavelength Ranges (wavenumber regions in cm^-1)
@@ -58,8 +58,8 @@ profiles:
       # ========================================================================
       # Baseline Drift Correction (for time-series data - step discontinuity removal)
       # ========================================================================
-      baseline_correction_threshold: 7.5       # MAD threshold multiplier for jump detection
-      baseline_correction_window: 15           # Number of points to average before/after jump for offset calculation
+      baseline_correction_threshold: 10       # MAD threshold multiplier for jump detection
+      baseline_correction_window: 5           # Number of points to average before/after jump for offset calculation
       baseline_correction_smooth_first: true   # If True, smooth signal before jump detection
       baseline_correction_smooth_window: 11    # Window size for Savitzky-Golay smoothing before jump detection (must be odd)
       baseline_correction_smooth_poly_order: 2 # Polynomial order for Savitzky-Golay smoothing before jump detection
@@ -70,6 +70,7 @@ profiles:
       # ========================================================================
       bin_factor: 2        # Binning factor for data reduction
       fft_top_peaks: 10    # Number of top peaks to extract from FFT analysis
+      skip_scans: 500     # Number of scans to skip from the beginning (default: 500)
 # ============================================================================
   # PETIOLE FEEDING PROFILES - For plant-based experiments
   # Data location: IAA-SILK-FILM/p830/Petiole feeding/
