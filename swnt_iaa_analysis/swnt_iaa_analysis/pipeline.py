@@ -145,9 +145,25 @@ class RamanPipeline:
         raman_df = self.dataset.spectra
         config = self.config
         
-        # Get wavenumbers
+        # Get raw wavenumbers from file (usually based on device's assumed excitation wavelength)
         wavenumbers_full = np.array([float(col) for col in raman_df.columns 
                                     if col not in ['Scan Number', 'Seconds']])
+        
+        # Get excitation wavelength parameters with defaults
+        # "excitation_nm": The laser you ACTUALLY used (e.g. 830)
+        # "recorded_excitation_nm": The laser the file metadata implies (e.g. 785)
+        processing_cfg = config.get('processing', {})
+        actual_excitation = processing_cfg.get('excitation_nm', config.get('excitation_nm', 830))
+        assumed_excitation = processing_cfg.get('recorded_excitation_nm', config.get('recorded_excitation_nm', actual_excitation))
+        
+        # Apply wavenumber correction if excitation wavelengths differ
+        if actual_excitation != assumed_excitation:
+            logger.info(f"Correcting wavenumbers: {assumed_excitation}nm -> {actual_excitation}nm")
+            shift_val = (1e7 / assumed_excitation) - (1e7 / actual_excitation)
+            wavenumbers_full = wavenumbers_full - shift_val
+            logger.info(f"Applied wavenumber shift: {shift_val:.2f} cm^-1")
+        
+        # Filter wavenumbers (start at 250 cm^-1)
         wavenumber_filter = wavenumbers_full >= 250
         wavenumbers = wavenumbers_full[wavenumber_filter]
         

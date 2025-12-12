@@ -11,7 +11,8 @@ profiles:
       # ========================================================================
       # Spectroscopy/Excitation Parameters
       # ========================================================================
-      excitation_nm: 830  # Laser excitation wavelength (nm)
+      excitation_nm: 830  # Laser excitation wavelength (nm) - The laser you ACTUALLY used
+      recorded_excitation_nm: 840  # The laser the file metadata implies (raw text files usually come from a device set to 785nm)
       
       # ========================================================================
       # Emission Wavelength Ranges (wavenumber regions in cm^-1)
