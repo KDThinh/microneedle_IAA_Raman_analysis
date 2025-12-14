@@ -8,7 +8,7 @@ readme_file = Path(__file__).parent / "README.md"
 long_description = readme_file.read_text() if readme_file.exists() else ""
 
 setup(
-    name="swnt-iaa-analysis",
+    name="swnt_iaa_analysis",
     version="1.0.0",
     author="",
     author_email="",
@@ -40,7 +40,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "swnt-iaa-analysis=swnt_iaa_analysis.cli:app",
+            "swnt_iaa_analysis=swnt_iaa_analysis.cli:app",
         ],
     },
 )

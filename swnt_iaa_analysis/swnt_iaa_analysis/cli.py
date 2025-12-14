@@ -37,7 +37,7 @@ def analyze(
     ),
 ):
     """
-    Run complete Raman analysis pipeline.
+    Run complete Raman analysis pipeline for a single profile.
     
     Examples:
         swnt-iaa-analysis analyze bokchoy_control_6to22_Temp_Hum_Variable_Run1
