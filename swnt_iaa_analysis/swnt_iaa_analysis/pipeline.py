@@ -18,7 +18,7 @@ from .analysis.ratios import calculate_ratios
 from .analysis.fourier import compute_fourier_transform, compute_diurnal_average
 from .io.config import load_profile_config
 from .io.exporter import export_results, export_fft_results
-from .visualization.plotting import plot_ratio_timeseries, plot_signal_correction_comparison, plot_representative_raman_spectrum
+from .visualization.plotting import plot_ratio_timeseries, plot_signal_correction_comparison, plot_representative_raman_spectrum, plot_fft_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +103,17 @@ class RamanPipeline:
                 # Use the same directory as the Raman data file
                 data_file_path = Path(self.dataset.source_path)
                 data_dir = data_file_path.parent
-                output_dir = str(data_dir / f"results_{self.profile_name}")
+                # Use results_v4_{timestamp} format for v4 algorithm
+                if self.algorithm == 'v4':
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    output_dir = str(data_dir / f"results_v4_{timestamp}")
+                else:
+                    output_dir = str(data_dir / f"results_{self.profile_name}")
             
-            self.output_dir = Path(add_timestamp_to_output_dir(output_dir))
+            if self.algorithm != 'v4':  # Only add timestamp if not v4 (v4 already has timestamp)
+                self.output_dir = Path(add_timestamp_to_output_dir(output_dir))
+            else:
+                self.output_dir = Path(output_dir)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Output directory: {self.output_dir}")
         
@@ -127,7 +135,7 @@ class RamanPipeline:
         # 2a. Apply signal corrections (spike removal and baseline correction) for v4
         if self.algorithm == 'v4':
             logger.info("Applying signal corrections (spike removal and baseline correction)...")
-            # Store original data for comparison plots
+            # Store original data for comparison plots (original columns are preserved, corrected ones created with _BaselineCorrected suffix)
             results_original = self.results.copy()
             self.results, jump_info_dict = self._apply_signal_corrections(self.results)
             # Plot before/after comparison
@@ -151,6 +159,13 @@ class RamanPipeline:
         if self.algorithm == 'v4' and self.representative_spectrum_data is not None:
             logger.info("Generating representative Raman spectrum plot...")
             plot_representative_raman_spectrum(self.representative_spectrum_data, self.output_dir, self.config)
+        
+        # 5b. Plot FFT analysis (for v4)
+        if self.algorithm == 'v4' and self.fft_results:
+            logger.info("Generating FFT analysis plots...")
+            for key, fft_result in self.fft_results.items():
+                ratio_name = 'Fluorescence to G-band Ratio' if key == 'gband' else f'Ratio ({key})'
+                plot_fft_analysis(self.results, fft_result, self.output_dir, self.config, ratio_name=ratio_name)
         
         logger.info("Pipeline execution complete!")
         return self.results
@@ -403,8 +418,11 @@ class RamanPipeline:
             corrected_full = np.full_like(signal, np.nan)
             corrected_full[mask] = corrected_signal
             
-            # Update the column in place
-            df_corrected[col] = corrected_full
+            # Create new column with _BaselineCorrected suffix (preserve original column)
+            corrected_col_name = col + '_BaselineCorrected'
+            df_corrected[corrected_col_name] = corrected_full
+            
+            # Original column remains unchanged (will be included in CSV export)
         
         return df_corrected, jump_info_dict
     
@@ -428,7 +446,16 @@ class RamanPipeline:
         )
     
     def _compute_fft(self) -> dict:
-        """Compute Fourier transforms."""
+        """
+        Compute Fourier transforms on processed signal.
+        
+        Processing pipeline:
+        1. Extract baseline-corrected ratio
+        2. Apply Gaussian smoothing
+        3. Apply ALS baseline correction (to remove long-term trends)
+        4. Mean detrending (in compute_fourier_transform)
+        5. Compute FFT
+        """
         if self.results is None or len(self.results) == 0:
             return {}
         
@@ -447,6 +474,9 @@ class RamanPipeline:
         
         fft_results = {}
         
+        # Import required functions
+        from .core.baseline import apply_gaussian_smoothing, apply_als_baseline
+        
         # Process G-band ratio if available
         ratio_col = 'Fluorescence_to_Gband_Ratio_BaselineCorrected'
         if ratio_col not in self.results.columns:
@@ -456,8 +486,31 @@ class RamanPipeline:
             signal = self.results[ratio_col].values
             mask = ~np.isnan(signal)
             if np.sum(mask) >= 3:
-                fft_result = compute_fourier_transform(signal[mask], time_hours[mask], 
-                                                      top_peaks=self.config.get('fft_top_peaks', 10))
+                # Step 1: Extract valid signal (baseline-corrected ratio)
+                signal_valid = signal[mask]
+                time_hours_valid = time_hours[mask]
+                
+                # Step 2: Apply Gaussian smoothing
+                processing_cfg = self.config.get('processing', {})
+                sigma_gaussian = processing_cfg.get('sigma_gaussian', self.config.get('sigma_gaussian', 50))
+                logger.info(f"Applying Gaussian smoothing (sigma={sigma_gaussian}) to {ratio_col} for FFT...")
+                signal_smoothed = apply_gaussian_smoothing(signal_valid, sigma=sigma_gaussian)
+                
+                # Step 3: Apply ALS baseline correction (to remove long-term trends)
+                lam_als = processing_cfg.get('lam_als', self.config.get('lam_als', 100000000))
+                p_als = processing_cfg.get('p_als', self.config.get('p_als', 0.000100))
+                niter_als = processing_cfg.get('niter_als', self.config.get('niter_als', 20))
+                logger.info(f"Applying ALS baseline correction (lam={lam_als}, p={p_als}, niter={niter_als})...")
+                als_baseline = apply_als_baseline(signal_smoothed, lam=lam_als, p=p_als, niter=niter_als)
+                signal_als_corrected = signal_smoothed - als_baseline
+                
+                # Step 4 & 5: Mean detrending and FFT computation (done inside compute_fourier_transform)
+                logger.info("Computing FFT on processed signal...")
+                fft_result = compute_fourier_transform(
+                    signal_als_corrected, 
+                    time_hours_valid, 
+                    top_peaks=self.config.get('fft_top_peaks', 10)
+                )
                 fft_results['gband'] = fft_result
         
         return fft_results
@@ -480,14 +533,15 @@ class RamanPipeline:
         for col in ratio_cols:
             plot_ratio_timeseries(self.results, col, self.output_dir, self.config)
         
-        # Plot normalized intensity timeseries (for v4 algorithm)
+        # Plot normalized timeseries (for v4 algorithm)
+        # Use Area-based columns for G-band and Raman peak 850 (based on Lorentzian fit area)
         if self.algorithm == 'v4':
-            intensity_cols = [
-                'Normalized_Fluorescence_Intensity',
-                'Normalized_Gband_Intensity',
-                'Normalized_Raman_Peak_850_Intensity'
+            timeseries_cols = [
+                'Normalized_Fluorescence_Intensity',  # Area-based (AUC calculation)
+                'Normalized_Gband_Area',  # Area from Lorentzian fit
+                'Normalized_Raman_Peak_850_Area'  # Area from Lorentzian fit
             ]
-            for col in intensity_cols:
+            for col in timeseries_cols:
                 if col in self.results.columns:
                     plot_ratio_timeseries(self.results, col, self.output_dir, self.config)
 

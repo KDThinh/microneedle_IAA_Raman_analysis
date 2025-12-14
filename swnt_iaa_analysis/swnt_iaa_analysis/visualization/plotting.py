@@ -388,3 +388,165 @@ def plot_representative_raman_spectrum(spectrum_data, output_dir, config):
     plt.close()
     print(f"Representative Raman spectrum plot saved to: {plot_path}")
 
+
+def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='Fluorescence to G-band Ratio'):
+    """
+    Create publication-quality FFT plots with timeseries and spectrum.
+    
+    Parameters:
+    -----------
+    results_df : pandas.DataFrame
+        DataFrame with datetime index and ratio column
+    fft_results : dict
+        Dictionary containing FFT results from compute_fourier_transform
+    output_dir : Path
+        Output directory for saving plot
+    config : dict
+        Configuration dictionary
+    ratio_name : str
+        Name of the ratio being analyzed (for plot labels)
+    """
+    create_dir_if_needed(str(output_dir))
+    
+    if not fft_results or 'peaks' not in fft_results or fft_results['peaks'] is None:
+        print(f"Warning: No FFT results available for {ratio_name}")
+        return
+    
+    # Get ratio column name from results
+    ratio_col = 'Fluorescence_to_Gband_Ratio_BaselineCorrected'
+    if ratio_col not in results_df.columns:
+        ratio_col = 'Fluorescence_to_Gband_Ratio'
+    
+    if ratio_col not in results_df.columns:
+        print(f"Warning: Ratio column not found for FFT plot")
+        return
+    
+    # Get signal and time data
+    signal = results_df[ratio_col].values
+    mask = ~np.isnan(signal)
+    
+    if np.sum(mask) < 3:
+        print(f"Warning: Insufficient data for FFT plot")
+        return
+    
+    signal_valid = signal[mask]
+    
+    # Get FFT data
+    peaks_df = fft_results['peaks']
+    complete_df = fft_results.get('complete', None)
+    
+    # Extract positive frequencies and magnitude from complete data
+    if complete_df is not None:
+        positive_mask = complete_df['Frequency (cycles/hour)'] > 0
+        positive_freqs = complete_df['Frequency (cycles/hour)'][positive_mask].values
+        magnitude = complete_df['Magnitude'][positive_mask].values
+    else:
+        # Fallback: reconstruct from peaks (less ideal)
+        peak_freqs = peaks_df['Frequency (cycles/hour)'].values
+        peak_mags = peaks_df['Magnitude'].values
+        # Create simple frequency range
+        max_freq = min(0.5, peak_freqs.max() * 1.2) if len(peak_freqs) > 0 else 0.5
+        positive_freqs = np.linspace(0.001, max_freq, 1000)
+        # Interpolate magnitude (simplified)
+        magnitude = np.interp(positive_freqs, peak_freqs, peak_mags)
+    
+    # Get peak data
+    top_peaks = config.get('fft_top_peaks', 10)
+    if len(peaks_df) > 0:
+        peak_freqs = peaks_df['Frequency (cycles/hour)'].values[:top_peaks]
+        peak_magnitudes = peaks_df['Magnitude'].values[:top_peaks]
+    else:
+        peak_freqs = np.array([])
+        peak_magnitudes = np.array([])
+    
+    # Get configuration for plot annotations
+    light_cycle = config.get('metadata', {}).get('light_cycle', 'Constant')
+    light_transition = parse_light_transition_config(config)
+    shade_transition = parse_shade_transition_config(config)
+    treatment_events = parse_treatment_events_config(config)
+    
+    # Create combined plot: timeseries on top, FFT below
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=False, gridspec_kw={'hspace': 0.35})
+    
+    # Top subplot: Timeseries of ratio
+    if pd.api.types.is_datetime64_any_dtype(results_df.index):
+        datetimes_valid = results_df.index[mask]
+        ax1.plot(datetimes_valid, signal_valid, color='#2E86AB', alpha=0.8, linewidth=2, label=ratio_name)
+        
+        # Add day/night shading
+        add_day_night_shading(ax1, datetimes_valid.min(), datetimes_valid.max(), 
+                             light_cycle=light_cycle, light_transition=light_transition)
+        
+        # Add vertical lines for transitions
+        if light_transition:
+            transition_time = light_transition['transition_datetime']
+            if datetimes_valid.min() <= transition_time <= datetimes_valid.max():
+                ax1.axvline(transition_time, color='red', linestyle='--', linewidth=2, 
+                          alpha=0.7, label='Light transition')
+        
+        if shade_transition:
+            transition_time = shade_transition['transition_datetime']
+            if datetimes_valid.min() <= transition_time <= datetimes_valid.max():
+                label_text = 'Shade transition'
+                if 'ppfd' in shade_transition:
+                    label_text += f" (PPFD: {shade_transition['ppfd']})"
+                ax1.axvline(transition_time, color='purple', linestyle='--', linewidth=2, 
+                          alpha=0.7, label=label_text)
+        
+        if treatment_events:
+            for event in treatment_events:
+                event_time = event['datetime']
+                if datetimes_valid.min() <= event_time <= datetimes_valid.max():
+                    ax1.axvline(event_time, color=event['marker_color'], linestyle=event['marker_style'], 
+                              linewidth=1.5, alpha=0.6, label=event.get('description', event['event_type']))
+        
+        ax1.set_xlabel('Date time (MM-DD HH)', fontsize=13, fontweight='bold')
+        ax1.xaxis.set_major_formatter(DateFormatter('%m-%d %H'))
+        ax1.xaxis.set_major_locator(DayLocator())
+        fig.autofmt_xdate()
+    else:
+        # Fallback for non-datetime index
+        time_hours_valid = np.arange(len(signal_valid))
+        ax1.plot(time_hours_valid, signal_valid, color='#2E86AB', alpha=0.8, linewidth=2, label=ratio_name)
+        ax1.set_xlabel('Time (hours from start)', fontsize=13, fontweight='bold')
+    
+    ax1.set_ylabel(ratio_name, fontsize=13, fontweight='bold')
+    ax1.set_title(f'Timeseries - {ratio_name}', fontsize=14, fontweight='bold', pad=10)
+    ax1.legend(fontsize=11, loc='best', framealpha=0.9)
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.tick_params(axis='both', labelsize=12)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    
+    # Bottom subplot: FFT Spectrum
+    ax2.plot(positive_freqs, magnitude, color='#1E88E5', linewidth=2, label='FFT Magnitude', zorder=1)
+    
+    if len(peak_freqs) > 0:
+        ax2.scatter(peak_freqs, peak_magnitudes, color='#D32F2F', s=150, zorder=5, 
+                   label=f'Top {len(peak_freqs)} Peaks', marker='o', edgecolors='darkred', 
+                   linewidths=2, alpha=0.9)
+    
+    # Highlight diurnal range (0.03-0.05 cycles/hour, ~20-33 hour period)
+    ax2.axvspan(0.03, 0.05, alpha=0.2, color='gold', label='Diurnal Range (20-33h)', zorder=0)
+    
+    # Add vertical line at 24h period (0.0417 cycles/hour)
+    ax2.axvline(1/24, color='red', linestyle=':', linewidth=2, alpha=0.6, 
+               label='24h Period', zorder=2)
+    
+    ax2.set_xlabel('Frequency (cycles/hour)', fontsize=13, fontweight='bold')
+    ax2.set_ylabel('Magnitude', fontsize=13, fontweight='bold')
+    ax2.set_title(f'FFT Spectrum - {ratio_name}', fontsize=14, fontweight='bold', pad=10)
+    ax2.set_xlim(0, 0.5)
+    ax2.grid(True, alpha=0.3, linestyle='--')
+    ax2.legend(fontsize=11, loc='best', framealpha=0.9)
+    ax2.tick_params(axis='both', labelsize=12)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    
+    # Save plot
+    timestamp = datetime.now().strftime("%Y%m%d")
+    plot_filename = f'fft_analysis_{ratio_name.lower().replace(" ", "_").replace("/", "_")}_{timestamp}.png'
+    plot_path = Path(output_dir) / plot_filename
+    plt.savefig(str(plot_path), dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"FFT analysis plot saved to: {plot_path}")

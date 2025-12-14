@@ -79,7 +79,7 @@ profiles:
     description: IAA solution is fed into a cut petiole via syringe system, done at DiSTAP.
     inherits: processing_default
     data_source:
-      raman_relative_path: G:\My Drive\Work\DiSTAP\Research\Auxin IAA\IAA-MN longitudinal\IAA Nanosensor Experiment\Petiole Feeding\run 1\run 1 rep.txt
+      raman_relative_path: IAA Nanosensor Experiment\Petiole Feeding\run 1\run 1 rep.txt
     metadata:
       experiment: petiole feeding
       plant_type: Nb
@@ -92,7 +92,7 @@ profiles:
     description: IAA solution is fed into a cut petiole via syringe system, done at DiSTAP.
     inherits: processing_default
     data_source:
-      raman_relative_path: G:\My Drive\Work\DiSTAP\Research\Auxin IAA\IAA-MN longitudinal\IAA Nanosensor Experiment\Petiole Feeding\run 2\run 2.txt
+      raman_relative_path: IAA Nanosensor Experiment\Petiole Feeding\run 2\run 2.txt
     metadata:
       experiment: petiole feeding
       plant_type: Nb
@@ -105,7 +105,7 @@ profiles:
     description: IAA solution is fed into a cut petiole via syringe system, done at DiSTAP.
     inherits: processing_default
     data_source:
-      raman_relative_path: G:\My Drive\Work\DiSTAP\Research\Auxin IAA\IAA-MN longitudinal\IAA Nanosensor Experiment\Petiole Feeding\run 3\run 3.txt
+      raman_relative_path: IAA Nanosensor Experiment\Petiole Feeding\run 3\run 3.txt
     metadata:
       experiment: petiole feeding
       plant_type: Nb
@@ -205,7 +205,24 @@ profiles:
       replicate_number: 1
     outputs:
       timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
-    
+
+  Nb_Control_8to24_Temp_Hum_Const_Run2:
+    description: Nb Control treatment, 8to24 light cycle, constant temp/humidity (Temp_Hum_Control - controlled and recorded), Run 2, done at TLL.
+    inherits: processing_default
+    data_source:
+      raman_relative_path: IAA Nanosensor Experiment/In planta/Nb/Treatment_Control/Light_8to24/Temp_Hum_Control/Run 2/Raw data/run 2.txt
+    metadata:
+      experiment: in planta
+      plant_type: Nb
+      treatment: Control
+      temp_hum_control: Yes
+      light_cycle: 8to24
+      replicate_number: 2
+    processing:
+      recorded_excitation_nm: 840
+    outputs:
+      timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
+
   Nb_Control_Constant_Temp_Hum_Const_Run1:
     description: Nb Control treatment, Constant light, constant temp/humidity (Temp_Hum_Control - controlled and recorded), Run 1, done at TLL. Light changed from 8to24 to Constant on 8 Aug 2025, 4 pm. Drought stress observed on 17 Aug 2025.
     inherits: processing_default
@@ -252,6 +269,27 @@ profiles:
       initial_light_cycle: "8to24"
     outputs:
       timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
+
+  Nb_Control_Constant_Temp_Hum_Const_Run3:
+    description: Nb Control treatment, Constant light, constant temp/humidity (Temp_Hum_Control - controlled and recorded), Run 3, done at TLL. Light changed from 8to24 to Constant on 05 Dec 2025, 10 am.
+    inherits: processing_default
+    data_source:
+      raman_relative_path: IAA Nanosensor Experiment/In planta/Nb/Treatment_Control/Light_Constant/Temp_Hum_Constant/Run 3/Raw data/run 1.txt
+    metadata:
+      experiment: in planta
+      plant_type: Nb
+      treatment: Control
+      temp_hum_control: Yes
+      light_cycle: Constant
+      replicate_number: 3
+    processing:
+      recorded_excitation_nm: 835
+    # Light cycle transition: started with 8to24, switched to Constant on 05 Dec 2025, 10 am
+    light_transition:
+      transition_datetime: "2025-12-05 10:00:00"  # Format: YYYY-MM-DD HH:MM:SS
+      initial_light_cycle: "8to24"
+    outputs:
+      timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime  
 
   Nb_Control_Constant_Temp_Hum_Variable_Run1:
     description: Nb Control treatment, Constant light, variable temp/humidity (Temp_Hum_Variable - uncontrolled but recorded), Run 1, done at Distap
