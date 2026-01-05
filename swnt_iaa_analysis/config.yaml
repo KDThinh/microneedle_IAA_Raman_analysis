@@ -64,6 +64,8 @@ profiles:
       baseline_correction_smooth_window: 5    # Window size for Savitzky-Golay smoothing before jump detection (must be odd)
       baseline_correction_smooth_poly_order: 2 # Polynomial order for Savitzky-Golay smoothing before jump detection
       baseline_correction_correct_smoothed: true # If True, apply correction to smoothed signal; if False, to original signal
+      baseline_detect_cumulative_jumps: true  # If True, also detect gradual jumps over multiple consecutive points
+      baseline_cumulative_window: 5           # Window size for detecting cumulative/gradual jumps (total change over N consecutive points)
       
       # ========================================================================
       # Data Processing/Analysis
@@ -188,8 +190,56 @@ profiles:
       temp_hum_control: No
       light_cycle: 6to22
       replicate_number: 1
+    processing:
+      baseline_correction_threshold: 5    # MAD threshold multiplier for jump detection
+      baseline_correction_window: 15       # Number of points to average before/after jump for offset calculation
     outputs:
       timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
+
+  Nb_Control_6to22_Temp_Hum_Variable_Run2:
+    description: Nb Control treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable - uncontrolled but recorded), Run 2, done at DiSTAP
+    inherits: processing_default
+    data_source:
+      raman_relative_path: IAA Nanosensor Experiment\In planta\Nb\Treatment_Control\Light_6to22\Temp_Hum_Variable\Run 2\Raw data\run 8\run 8_rep.txt
+      temp_relative_path: DiSTAP/Research/Auxin IAA/IAA-MN longitudinal/IAA Nanosensor Experiment/In planta/Temperature and humidity/Indoor_thermometer.csv
+    metadata:
+      experiment: in planta
+      plant_type: Nb
+      treatment: Control
+      temp_hum_control: No
+      light_cycle: 6to22
+      replicate_number: 2
+    processing:
+      baseline_correction_threshold: 20    # MAD threshold multiplier for jump detection
+      baseline_correction_window: 15       # Number of points to average before/after jump for offset calculation
+      baseline_detect_cumulative_jumps: true  # If True, also detect gradual jumps over multiple consecutive points
+      baseline_cumulative_window: 5           # Window size for detecting cumulative/gradual jumps (total change over N consecutive points) 
+    outputs:
+      timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
+
+
+  Nb_Drought_6to22_Temp_Hum_Variable_Run2:
+    description: Nb Drought treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable - uncontrolled but recorded), Run 2, done at DiSTAP. Drought stress observed on May 31, 2025, 3:00 PM.
+    inherits: processing_default
+    data_source:
+      raman_relative_path: IAA Nanosensor Experiment\In planta\Nb\Treatment_Drought\Light_6to22\Temp_Hum_Variable\Run 2\Raw data\combined_raman_data.txt
+      temp_relative_path: DiSTAP/Research/Auxin IAA/IAA-MN longitudinal/IAA Nanosensor Experiment/In planta/Temperature and humidity/Indoor_thermometer.csv
+    metadata:
+      experiment: in planta
+      plant_type: Nb
+      treatment: Drought
+      temp_hum_control: No
+      light_cycle: 6to22
+      replicate_number: 2
+    outputs:
+      timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
+    # Treatment events: only stress observations
+    treatment_events:
+      - datetime: "2025-05-31 15:00:00"  # May 31, 2025, 3:00 PM
+        event_type: "drought_stress_observed"
+        description: "Drought stress observed"
+        marker_color: "red"
+        marker_style: "dotted"
 
   Nb_Control_8to24_Temp_Hum_Const_Run1:
     description: Nb Control treatment, 8to24 light cycle, constant temp/humidity (Temp_Hum_Control - controlled and recorded), Run 1, done at TLL

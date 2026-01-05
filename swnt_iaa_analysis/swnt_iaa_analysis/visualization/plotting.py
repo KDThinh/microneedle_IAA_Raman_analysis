@@ -181,15 +181,21 @@ def plot_signal_correction_comparison(df_original, df_corrected, output_dir, con
         x_axis_type = 'datetime'
     
     for col in columns_to_plot:
-        if col not in df_original.columns or col not in df_corrected.columns:
-            print(f"Warning: Column '{col}' not found in both DataFrames, skipping...")
+        if col not in df_original.columns:
+            print(f"Warning: Column '{col}' not found in original DataFrame, skipping...")
+            continue
+        
+        # Get the corrected column name (with _BaselineCorrected suffix)
+        corrected_col_name = col + '_BaselineCorrected'
+        if corrected_col_name not in df_corrected.columns:
+            print(f"Warning: Corrected column '{corrected_col_name}' not found in corrected DataFrame, skipping...")
             continue
         
         fig, ax = plt.subplots(figsize=(14, 6))
         
         x_values = df_original.index
         y_original = df_original[col].values
-        y_corrected = df_corrected[col].values
+        y_corrected = df_corrected[corrected_col_name].values  # FIX: Use corrected column, not original
         
         # Plot original data (gray - conventional for raw/original data)
         ax.plot(x_values, y_original, 'o-', color='gray', alpha=0.7, 

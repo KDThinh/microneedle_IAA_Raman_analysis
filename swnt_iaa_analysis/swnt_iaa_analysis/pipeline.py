@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
+import json
 
 import numpy as np
 import pandas as pd
@@ -331,19 +332,45 @@ class RamanPipeline:
             (DataFrame with corrected columns, dict of jump information per column)
         """
         config = self.config
-        processing_cfg = config.get('processing', {})
+        # After flattening, processing params are at top level, but nested structure may be in sections
+        processing_cfg = config.get('processing', {}) or config.get('sections', {}).get('processing', {})
         
         # Get parameters from config with defaults
-        spike_window = processing_cfg.get('spike_window', 5)
-        spike_threshold = processing_cfg.get('spike_threshold', 3.0)
-        baseline_threshold_multiplier = processing_cfg.get('baseline_threshold_multiplier', 5.0)
-        baseline_window_size = processing_cfg.get('baseline_window_size', 5)
-        baseline_smooth_first = processing_cfg.get('baseline_smooth_first', True)
-        baseline_smooth_window = processing_cfg.get('baseline_smooth_window', 11)
-        baseline_smooth_poly_order = processing_cfg.get('baseline_smooth_poly_order', 2)
-        baseline_correct_smoothed = processing_cfg.get('baseline_correct_smoothed', False)
-        baseline_detect_cumulative_jumps = processing_cfg.get('baseline_detect_cumulative_jumps', True)
-        baseline_cumulative_window = processing_cfg.get('baseline_cumulative_window', 5)
+        # Note: After flattening by _flatten_profile, processing params are at top level (in config),
+        # but nested structure is also preserved in config['sections']['processing']
+        # So we check both: processing_cfg (nested) and config (flattened top-level)
+        # Also supports baseline_correction_* prefix (new) and baseline_* (old) for backwards compatibility
+        def get_param(nested_key, top_key=None, default=None):
+            """Helper to get parameter from nested or flattened location."""
+            if top_key is None:
+                top_key = nested_key
+            # Check nested processing section first, then flattened top level, then use default
+            if nested_key in processing_cfg:
+                return processing_cfg[nested_key]
+            if top_key in config:
+                return config[top_key]
+            return default
+        
+        spike_window = get_param('spike_window', default=5)
+        spike_threshold = get_param('spike_threshold', default=3.0)
+        baseline_threshold_multiplier = (get_param('baseline_correction_threshold') or
+                                        get_param('baseline_threshold_multiplier', default=5.0))
+        baseline_window_size = (get_param('baseline_correction_window') or
+                               get_param('baseline_window_size', default=5))
+        baseline_smooth_first = (get_param('baseline_correction_smooth_first') if 
+                                'baseline_correction_smooth_first' in processing_cfg or 'baseline_correction_smooth_first' in config else
+                                get_param('baseline_smooth_first', default=True))
+        baseline_smooth_window = (get_param('baseline_correction_smooth_window') or
+                                 get_param('baseline_smooth_window', default=11))
+        baseline_smooth_poly_order = (get_param('baseline_correction_smooth_poly_order') or
+                                     get_param('baseline_smooth_poly_order', default=2))
+        baseline_correct_smoothed = (get_param('baseline_correction_correct_smoothed') if
+                                    'baseline_correction_correct_smoothed' in processing_cfg or 'baseline_correction_correct_smoothed' in config else
+                                    get_param('baseline_correct_smoothed', default=False))
+        baseline_detect_cumulative_jumps = (get_param('baseline_detect_cumulative_jumps') if
+                                           'baseline_detect_cumulative_jumps' in processing_cfg or 'baseline_detect_cumulative_jumps' in config else
+                                           True)
+        baseline_cumulative_window = get_param('baseline_cumulative_window', default=5)
         
         # Columns to process
         columns_to_correct = [
@@ -397,6 +424,16 @@ class RamanPipeline:
                 cumulative_window=baseline_cumulative_window
             )
             
+            # #region agent log
+            _log_path = Path(__file__).parent.parent.parent / '.cursor' / 'debug.log'
+            _log_path.parent.mkdir(parents=True, exist_ok=True)
+            _max_diff_cleaned_corrected = np.nanmax(np.abs(corrected_signal - cleaned_signal)) if len(corrected_signal) == len(cleaned_signal) else -1
+            _are_identical_cleaned_corrected = np.allclose(corrected_signal, cleaned_signal, atol=1e-10) if len(corrected_signal) == len(cleaned_signal) else False
+            _step_changes = [j.get('step_change', 0) for j in jump_info] if jump_info else []
+            with open(_log_path, 'a') as f:
+                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H1,H3", "location": f"{__file__}:405", "message": "pipeline: after correct_baseline_shifts", "data": {"column": col, "num_jumps": len(jump_indices), "max_diff_cleaned_vs_corrected": float(_max_diff_cleaned_corrected), "are_identical": bool(_are_identical_cleaned_corrected), "step_changes": [float(s) for s in _step_changes], "correct_smoothed": baseline_correct_smoothed, "cleaned_sample": cleaned_signal[:5].tolist() if len(cleaned_signal) >= 5 else cleaned_signal.tolist(), "corrected_sample": corrected_signal[:5].tolist() if len(corrected_signal) >= 5 else corrected_signal.tolist()}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
+            # #endregion
+            
             if len(jump_indices) > 0:
                 logger.info(f"  Detected {len(jump_indices)} baseline jump(s) in {col}")
             
@@ -421,6 +458,17 @@ class RamanPipeline:
             # Create new column with _BaselineCorrected suffix (preserve original column)
             corrected_col_name = col + '_BaselineCorrected'
             df_corrected[corrected_col_name] = corrected_full
+            
+            # #region agent log
+            _log_path = Path(__file__).parent.parent.parent / '.cursor' / 'debug.log'
+            _orig_vals = df_corrected[col].values[~np.isnan(df_corrected[col].values)]
+            _corr_vals = df_corrected[corrected_col_name].values[~np.isnan(df_corrected[corrected_col_name].values)]
+            _min_len = min(len(_orig_vals), len(_corr_vals)) if len(_orig_vals) > 0 and len(_corr_vals) > 0 else 0
+            _max_diff_df = np.nanmax(np.abs(_orig_vals[:_min_len] - _corr_vals[:_min_len])) if _min_len > 0 else -1
+            _are_identical_df = np.allclose(_orig_vals[:_min_len], _corr_vals[:_min_len], atol=1e-10) if _min_len > 0 else False
+            with open(_log_path, 'a') as f:
+                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H3", "location": f"{__file__}:430", "message": "pipeline: after creating corrected column", "data": {"column": col, "corrected_col_name": corrected_col_name, "max_diff_df_columns": float(_max_diff_df), "are_identical_df": bool(_are_identical_df), "orig_sample": _orig_vals[:5].tolist() if len(_orig_vals) >= 5 else _orig_vals.tolist(), "corr_sample": _corr_vals[:5].tolist() if len(_corr_vals) >= 5 else _corr_vals.tolist()}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
+            # #endregion
             
             # Original column remains unchanged (will be included in CSV export)
         
@@ -527,6 +575,15 @@ class RamanPipeline:
         """Generate plots."""
         if self.results is None:
             return
+        
+        # #region agent log
+        _log_path = Path(__file__).parent.parent.parent / '.cursor' / 'debug.log'
+        _log_path.parent.mkdir(parents=True, exist_ok=True)
+        _ratio_cols = [col for col in self.results.columns if 'Ratio' in col]
+        _baseline_corrected_cols = [col for col in self.results.columns if 'BaselineCorrected' in col]
+        with open(_log_path, 'a') as f:
+            f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H5", "location": f"{__file__}:561", "message": "pipeline: _plot_results - checking columns", "data": {"all_columns": list(self.results.columns), "ratio_columns": _ratio_cols, "baseline_corrected_columns": _baseline_corrected_cols, "num_ratio_cols": len(_ratio_cols), "num_baseline_corrected_cols": len(_baseline_corrected_cols)}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
+        # #endregion
         
         # Plot ratio timeseries
         ratio_cols = [col for col in self.results.columns if 'Ratio' in col]
