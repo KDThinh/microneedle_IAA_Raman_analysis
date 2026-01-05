@@ -453,6 +453,117 @@ def correct_baseline_shifts(signal, threshold_multiplier=5, window_size=5,
     return y_corrected, np.array(clean_indices), jump_info, smoothed_signal
 
 
+def apply_corrections_at_jump_indices(signal, jump_indices_valid, window_size=5, 
+                                      smooth_first=True, smooth_window=11, smooth_poly_order=2,
+                                      correct_smoothed=False):
+    """
+    Apply baseline corrections at pre-detected jump indices.
+    
+    This function applies corrections at specified jump locations without detecting jumps.
+    Useful when jump detection is performed on one signal and the same jump locations
+    should be used for other signals.
+    
+    Parameters
+    ----------
+    signal : np.array
+        Array of signal values to correct
+    jump_indices_valid : np.array
+        Jump indices in valid signal space (must be sorted, correspond to positions in signal array)
+    window_size : int
+        Number of points to average before/after jump for offset calculation (default: 5)
+    smooth_first : bool
+        If True, smooth the signal before calculating offsets (default: True)
+    smooth_window : int
+        Window size for smoothing if smooth_first=True (default: 11)
+    smooth_poly_order : int
+        Polynomial order for smoothing if smooth_first=True (default: 2)
+    correct_smoothed : bool
+        If True, apply correction to smoothed signal; if False, to original signal (default: False)
+    
+    Returns
+    -------
+    corrected_signal : np.array
+        Corrected signal
+    jump_info : list
+        List of dictionaries with jump information (index, val_before, val_after, step_change, cumulative_offset)
+    smoothed_signal : np.array
+        Smoothed signal (if smooth_first=True) or original signal (if smooth_first=False)
+    """
+    signal = np.array(signal).copy().astype(float)
+    jump_indices_valid = np.array(jump_indices_valid)
+    
+    if len(jump_indices_valid) == 0:
+        # No jumps to correct
+        if smooth_first:
+            from scipy.signal import savgol_filter
+            smoothed_signal = savgol_filter(signal, smooth_window, smooth_poly_order) if len(signal) >= smooth_window else signal.copy()
+        else:
+            smoothed_signal = signal.copy()
+        return signal.copy(), [], smoothed_signal
+    
+    # Sort jump indices
+    jump_indices_valid = np.sort(jump_indices_valid)
+    # Filter to valid range
+    jump_indices_valid = jump_indices_valid[(jump_indices_valid >= 0) & (jump_indices_valid < len(signal))]
+    
+    # Smooth signal if requested
+    if smooth_first and len(signal) >= smooth_window:
+        from scipy.signal import savgol_filter
+        smoothed_signal = savgol_filter(signal, smooth_window, smooth_poly_order)
+    else:
+        smoothed_signal = signal.copy()
+    
+    # Choose which signal to correct based on correct_smoothed parameter
+    if correct_smoothed:
+        target_signal = smoothed_signal.copy().astype(float)
+        y_corrected = smoothed_signal.copy().astype(float)
+    else:
+        target_signal = signal.copy().astype(float)
+        y_corrected = signal.copy().astype(float)
+    
+    cumulative_offset = 0.0
+    jump_info = []
+    
+    # Apply corrections at each jump index
+    for idx in jump_indices_valid:
+        # Define a small window before and after the jump index
+        start_idx = max(0, idx - window_size)
+        end_idx = min(len(target_signal), idx + window_size)
+        
+        # Calculate the median level before and after the jump
+        val_before = np.median(target_signal[start_idx:idx]) if idx > start_idx else target_signal[idx]
+        
+        # After jump: exclude jump point
+        after_start = idx + 1
+        if after_start < end_idx:
+            val_after = np.median(target_signal[after_start:end_idx])
+        else:
+            if idx + 1 < len(target_signal):
+                val_after = np.median(target_signal[idx+1:min(len(target_signal), idx+1+window_size)])
+            else:
+                val_after = val_before
+        
+        # The jump magnitude
+        step_change = val_after - val_before
+        
+        # Accumulate offset
+        cumulative_offset += step_change
+        
+        # Apply correction cumulatively
+        y_corrected[idx:] -= step_change
+        
+        jump_info.append({
+            'index': int(idx),
+            'val_before': float(val_before),
+            'val_after': float(val_after),
+            'step_change': float(step_change),
+            'cumulative_offset': float(cumulative_offset),
+            'jump_type': 'shared'  # Indicates this jump was shared from another signal
+        })
+    
+    return y_corrected, jump_info, smoothed_signal
+
+
 def parse_light_transition_config(config):
     """Parse light transition configuration from config dictionary."""
     light_transition = config.get('light_transition')

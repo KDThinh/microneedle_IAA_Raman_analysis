@@ -210,8 +210,8 @@ profiles:
       light_cycle: 6to22
       replicate_number: 2
     processing:
-      baseline_correction_threshold: 20    # MAD threshold multiplier for jump detection
-      baseline_correction_window: 15       # Number of points to average before/after jump for offset calculation
+      baseline_correction_threshold: 10    # MAD threshold multiplier for jump detection
+      baseline_correction_window: 5       # Number of points to average before/after jump for offset calculation
       baseline_detect_cumulative_jumps: true  # If True, also detect gradual jumps over multiple consecutive points
       baseline_cumulative_window: 5           # Window size for detecting cumulative/gradual jumps (total change over N consecutive points) 
     outputs:

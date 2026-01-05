@@ -13,7 +13,7 @@ import pandas as pd
 from .core.loader import load_raman_dataset, load_temperature_data
 from .core.preprocessing import apply_savgol_filter
 from .core.baseline import lieberfit
-from .core.utils import remove_spikes_hampel, correct_baseline_shifts
+from .core.utils import remove_spikes_hampel, correct_baseline_shifts, apply_corrections_at_jump_indices
 from .analysis.peaks import find_peak_lorentzian
 from .analysis.ratios import calculate_ratios
 from .analysis.fourier import compute_fourier_transform, compute_diurnal_average
@@ -373,6 +373,7 @@ class RamanPipeline:
         baseline_cumulative_window = get_param('baseline_cumulative_window', default=5)
         
         # Columns to process
+        reference_column = 'Normalized_Fluorescence_Intensity'
         columns_to_correct = [
             'Normalized_Fluorescence_Intensity',
             'Normalized_Gband_Area',
@@ -381,8 +382,69 @@ class RamanPipeline:
         
         df_corrected = df.copy()
         jump_info_dict = {}  # Store jump information for each column
+        df_jump_indices_shared = np.array([], dtype=int)  # Shared jump indices in DataFrame space
         
+        # Process reference column first to detect jumps
+        if reference_column in df.columns:
+            logger.info(f"Processing reference column '{reference_column}' to detect baseline jumps...")
+            signal_ref = df[reference_column].values
+            
+            # Handle NaN values
+            mask_ref = ~np.isnan(signal_ref)
+            if np.sum(mask_ref) >= 3:
+                # Extract valid signal
+                signal_valid_ref = signal_ref[mask_ref]
+                valid_indices_ref = np.where(mask_ref)[0]
+                
+                # Remove spikes from reference
+                logger.info(f"Removing spikes from {reference_column}...")
+                cleaned_signal_ref, spike_mask_ref = remove_spikes_hampel(
+                    signal_valid_ref,
+                    window_size=spike_window,
+                    threshold=spike_threshold
+                )
+                n_spikes_ref = np.sum(spike_mask_ref)
+                if n_spikes_ref > 0:
+                    logger.info(f"  Removed {n_spikes_ref} spike(s) from {reference_column}")
+                
+                # Detect jumps on reference signal
+                logger.info(f"Detecting baseline jumps in {reference_column}...")
+                corrected_signal_ref, jump_indices_valid_ref, jump_info_ref, smoothed_signal_ref = correct_baseline_shifts(
+                    cleaned_signal_ref,
+                    threshold_multiplier=baseline_threshold_multiplier,
+                    window_size=baseline_window_size,
+                    smooth_first=baseline_smooth_first,
+                    smooth_window=baseline_smooth_window,
+                    smooth_poly_order=baseline_smooth_poly_order,
+                    correct_smoothed=baseline_correct_smoothed,
+                    detect_cumulative_jumps=baseline_detect_cumulative_jumps,
+                    cumulative_window=baseline_cumulative_window
+                )
+                
+                # Map jump indices from valid signal space to DataFrame indices
+                if len(jump_indices_valid_ref) > 0:
+                    df_jump_indices_shared = valid_indices_ref[jump_indices_valid_ref]
+                    logger.info(f"  Detected {len(df_jump_indices_shared)} baseline jump(s) on {reference_column}")
+                else:
+                    df_jump_indices_shared = np.array([], dtype=int)
+                    logger.info(f"  No baseline jumps detected on {reference_column}")
+                
+                # Store results for reference column
+                corrected_full_ref = np.full_like(signal_ref, np.nan)
+                corrected_full_ref[mask_ref] = corrected_signal_ref
+                corrected_col_name_ref = reference_column + '_BaselineCorrected'
+                df_corrected[corrected_col_name_ref] = corrected_full_ref
+                jump_info_dict[reference_column] = {
+                    'jump_indices': df_jump_indices_shared,
+                    'jump_info': jump_info_ref
+                }
+        
+        # Process all columns (reference column is skipped if already processed)
         for col in columns_to_correct:
+            # Skip reference column if already processed
+            if col == reference_column and col in jump_info_dict:
+                continue
+            
             if col not in df.columns:
                 logger.warning(f"Column '{col}' not found, skipping...")
                 continue
@@ -411,18 +473,53 @@ class RamanPipeline:
                 logger.info(f"  Removed {n_spikes} spike(s) from {col}")
             
             # Step 2: Correct baseline shifts
-            logger.info(f"Correcting baseline shifts in {col}...")
-            corrected_signal, jump_indices, jump_info, smoothed_signal = correct_baseline_shifts(
-                cleaned_signal,
-                threshold_multiplier=baseline_threshold_multiplier,
-                window_size=baseline_window_size,
-                smooth_first=baseline_smooth_first,
-                smooth_window=baseline_smooth_window,
-                smooth_poly_order=baseline_smooth_poly_order,
-                correct_smoothed=baseline_correct_smoothed,
-                detect_cumulative_jumps=baseline_detect_cumulative_jumps,
-                cumulative_window=baseline_cumulative_window
-            )
+            if col == reference_column:
+                # For reference column, use full detection
+                logger.info(f"Detecting baseline jumps in {col}...")
+                corrected_signal, jump_indices, jump_info, smoothed_signal = correct_baseline_shifts(
+                    cleaned_signal,
+                    threshold_multiplier=baseline_threshold_multiplier,
+                    window_size=baseline_window_size,
+                    smooth_first=baseline_smooth_first,
+                    smooth_window=baseline_smooth_window,
+                    smooth_poly_order=baseline_smooth_poly_order,
+                    correct_smoothed=baseline_correct_smoothed,
+                    detect_cumulative_jumps=baseline_detect_cumulative_jumps,
+                    cumulative_window=baseline_cumulative_window
+                )
+                # Update shared jump indices
+                if len(jump_indices) > 0:
+                    df_jump_indices_shared = valid_indices[jump_indices]
+            else:
+                # For other columns, apply corrections at shared jump indices from reference column
+                logger.info(f"Applying baseline corrections to {col} using jump indices from {reference_column}...")
+                # Map DataFrame jump indices to valid signal indices for this column
+                # Only include jumps that fall within valid data points for this column
+                jump_indices_valid_this_col = []
+                for df_idx in df_jump_indices_shared:
+                    # Find where this DataFrame index appears in valid_indices
+                    valid_pos = np.where(valid_indices == df_idx)[0]
+                    if len(valid_pos) > 0:
+                        jump_indices_valid_this_col.append(valid_pos[0])
+                
+                jump_indices_valid_this_col = np.array(jump_indices_valid_this_col, dtype=int)
+                
+                if len(jump_indices_valid_this_col) > 0:
+                    logger.info(f"  Applying corrections at {len(jump_indices_valid_this_col)} jump location(s) in {col}")
+                else:
+                    logger.info(f"  No valid jump locations found in {col} (all jumps fall on NaN values)")
+                
+                # Apply corrections at these jump indices
+                corrected_signal, jump_info, smoothed_signal = apply_corrections_at_jump_indices(
+                    cleaned_signal,
+                    jump_indices_valid_this_col,
+                    window_size=baseline_window_size,
+                    smooth_first=baseline_smooth_first,
+                    smooth_window=baseline_smooth_window,
+                    smooth_poly_order=baseline_smooth_poly_order,
+                    correct_smoothed=baseline_correct_smoothed
+                )
+                jump_indices = jump_indices_valid_this_col
             
             # #region agent log
             _log_path = Path(__file__).parent.parent.parent / '.cursor' / 'debug.log'
