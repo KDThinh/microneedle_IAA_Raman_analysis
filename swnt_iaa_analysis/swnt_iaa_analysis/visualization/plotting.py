@@ -5,6 +5,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.rcParams['font.size'] = 12
+matplotlib.rcParams['axes.labelsize'] = 12
+matplotlib.rcParams['axes.titlesize'] = 13
+matplotlib.rcParams['xtick.labelsize'] = 11
+matplotlib.rcParams['ytick.labelsize'] = 11
+matplotlib.rcParams['legend.fontsize'] = 10
+matplotlib.rcParams['figure.titlesize'] = 14
 from matplotlib.dates import DateFormatter, DayLocator
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from datetime import datetime
@@ -77,11 +85,14 @@ def plot_ratio_timeseries(df, column_name, output_dir, config, title=None):
     """
     create_dir_if_needed(str(output_dir))
     
+    # Create SVG subfolder
+    svg_dir = Path(output_dir) / "svg"
+    svg_dir.mkdir(parents=True, exist_ok=True)
+    
     if column_name not in df.columns:
-        print(f"Warning: Column '{column_name}' not found in DataFrame")
         return
     
-    fig, ax = plt.subplots(figsize=(14, 6))
+    fig, ax = plt.subplots(figsize=(10, 5))
     
     x_values = df.index
     y_values = df[column_name].values
@@ -127,18 +138,26 @@ def plot_ratio_timeseries(df, column_name, output_dir, config, title=None):
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f'{int(x)}'))
         ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
     
-    ax.set_ylabel(column_name, fontsize=14)
-    ax.set_title(title or f'Timeseries - {column_name}', fontsize=15, fontweight='bold')
-    ax.legend(fontsize=11, loc='best')
-    ax.grid(True, alpha=0.3)
-    ax.tick_params(axis='both', labelsize=12)
+    # Clean up column name for title
+    title_name = column_name.replace('_', ' ').replace('BaselineCorrected', '').strip()
+    if title_name.endswith('Ratio'):
+        title_name = title_name.replace('Fluorescence to', 'Fluorescence/')
     
-    timestamp = datetime.now().strftime("%Y%m%d")
-    plot_filename = f'timeseries_{column_name}_{timestamp}.png'
+    ax.set_ylabel(title_name, fontsize=12, fontweight='bold')
+    ax.set_title(title or title_name, fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10, loc='best', framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.tick_params(axis='both', labelsize=11)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plot_filename = f'timeseries_{column_name}.png'
     plot_path = Path(output_dir) / plot_filename
-    plt.savefig(str(plot_path), dpi=300, bbox_inches='tight')
+    svg_path = svg_dir / f'timeseries_{column_name}.svg'
+    
+    plt.savefig(str(plot_path), dpi=300, bbox_inches='tight', facecolor='white')
+    plt.savefig(str(svg_path), format='svg', bbox_inches='tight', facecolor='white')
     plt.close()
-    print(f"Plot saved to: {plot_path}")
 
 
 def plot_signal_correction_comparison(df_original, df_corrected, output_dir, config, jump_info_dict=None):
@@ -162,6 +181,10 @@ def plot_signal_correction_comparison(df_original, df_corrected, output_dir, con
     """
     create_dir_if_needed(str(output_dir))
     
+    # Create SVG subfolder
+    svg_dir = Path(output_dir) / "svg"
+    svg_dir.mkdir(parents=True, exist_ok=True)
+    
     # Columns to plot
     columns_to_plot = [
         'Normalized_Fluorescence_Intensity',
@@ -182,16 +205,14 @@ def plot_signal_correction_comparison(df_original, df_corrected, output_dir, con
     
     for col in columns_to_plot:
         if col not in df_original.columns:
-            print(f"Warning: Column '{col}' not found in original DataFrame, skipping...")
             continue
         
         # Get the corrected column name (with _BaselineCorrected suffix)
         corrected_col_name = col + '_BaselineCorrected'
         if corrected_col_name not in df_corrected.columns:
-            print(f"Warning: Corrected column '{corrected_col_name}' not found in corrected DataFrame, skipping...")
             continue
         
-        fig, ax = plt.subplots(figsize=(14, 6))
+        fig, ax = plt.subplots(figsize=(10, 5))
         
         x_values = df_original.index
         y_original = df_original[col].values
@@ -267,19 +288,23 @@ def plot_signal_correction_comparison(df_original, df_corrected, output_dir, con
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f'{int(x)}'))
             ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
         
-        ax.set_ylabel(col, fontsize=14)
-        ax.set_title(f'Signal Correction Comparison - {col}\nOriginal vs Corrected (Spike Removal + Baseline Correction)', 
-                    fontsize=15, fontweight='bold')
-        ax.legend(fontsize=11, loc='best')
-        ax.grid(True, alpha=0.3)
-        ax.tick_params(axis='both', labelsize=12)
+        # Clean up column name for labels
+        col_display = col.replace('_', ' ').replace('Normalized ', '')
+        ax.set_ylabel(col_display, fontsize=12, fontweight='bold')
+        ax.set_title(col_display, fontsize=13, fontweight='bold')
+        ax.legend(fontsize=10, loc='best', framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.tick_params(axis='both', labelsize=11)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
         
-        timestamp = datetime.now().strftime("%Y%m%d")
-        plot_filename = f'signal_correction_comparison_{col}_{timestamp}.png'
+        plot_filename = f'signal_correction_comparison_{col}.png'
         plot_path = Path(output_dir) / plot_filename
-        plt.savefig(str(plot_path), dpi=300, bbox_inches='tight')
+        svg_path = svg_dir / f'signal_correction_comparison_{col}.svg'
+        
+        plt.savefig(str(plot_path), dpi=300, bbox_inches='tight', facecolor='white')
+        plt.savefig(str(svg_path), format='svg', bbox_inches='tight', facecolor='white')
         plt.close()
-        print(f"Signal correction comparison plot saved to: {plot_path}")
 
 
 def plot_representative_raman_spectrum(spectrum_data, output_dir, config):
@@ -310,6 +335,10 @@ def plot_representative_raman_spectrum(spectrum_data, output_dir, config):
     
     create_dir_if_needed(str(output_dir))
     
+    # Create SVG subfolder
+    svg_dir = Path(output_dir) / "svg"
+    svg_dir.mkdir(parents=True, exist_ok=True)
+    
     # Extract spectrum data
     wavenumbers = spectrum_data.get('wavenumbers')
     intensities_normalized = spectrum_data.get('intensities_normalized')
@@ -320,7 +349,6 @@ def plot_representative_raman_spectrum(spectrum_data, output_dir, config):
     scan_number = spectrum_data.get('scan_number', 'unknown')
     
     if wavenumbers is None or intensities_normalized is None:
-        print("Warning: Missing spectrum data for representative plot")
         return
     
     # Import lorentzian function
@@ -378,21 +406,168 @@ def plot_representative_raman_spectrum(spectrum_data, output_dir, config):
                 # Mark peak center
                 ax.axvline(center, color='orange', linestyle=':', alpha=0.5, linewidth=1.5)
     
-    ax.set_xlabel('Wavenumber (cm⁻¹)', fontsize=14)
-    ax.set_ylabel('Normalized Intensity', fontsize=14)
-    ax.set_title(f'Representative Raman Spectrum - Scan {scan_number}\n(Normalized, Lieberfit Baseline, and Lorentzian Fits)', 
-                 fontsize=16, fontweight='bold')
-    ax.legend(fontsize=11, loc='best')
-    ax.grid(True, alpha=0.3)
-    ax.tick_params(axis='both', labelsize=12)
+    ax.set_xlabel('Wavenumber (cm⁻¹)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Normalized Intensity', fontsize=12, fontweight='bold')
+    ax.set_title(f'Raman Spectrum (Scan {scan_number})', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10, loc='best', framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.tick_params(axis='both', labelsize=11)
     ax.set_xlim(250, max(wavenumbers))
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
     
-    timestamp = datetime.now().strftime("%Y%m%d")
-    plot_filename = f'representative_raman_spectrum_scan_{scan_number}_{timestamp}.png'
+    plot_filename = f'representative_raman_spectrum_scan_{scan_number}.png'
     plot_path = Path(output_dir) / plot_filename
-    plt.savefig(str(plot_path), dpi=300, bbox_inches='tight')
+    svg_path = svg_dir / f'representative_raman_spectrum_scan_{scan_number}.svg'
+    
+    plt.savefig(str(plot_path), dpi=300, bbox_inches='tight', facecolor='white')
+    plt.savefig(str(svg_path), format='svg', bbox_inches='tight', facecolor='white')
     plt.close()
-    print(f"Representative Raman spectrum plot saved to: {plot_path}")
+
+
+def plot_spike_removal_comparison(df_original, df_cleaned, output_dir, config, spike_info_dict=None):
+    """
+    Plot overlaid time-series showing before and after spike removal.
+    
+    Creates separate plots for each column showing original vs spike-cleaned data.
+    
+    Parameters:
+    -----------
+    df_original : pandas.DataFrame
+        DataFrame with original (with spikes) data
+    df_cleaned : pandas.DataFrame
+        DataFrame with spikes removed
+    output_dir : Path
+        Output directory for saving plots
+    config : dict
+        Configuration dictionary
+    spike_info_dict : dict, optional
+        Dictionary mapping column names to spike information dicts with 'spike_indices' key
+    """
+    create_dir_if_needed(str(output_dir))
+    
+    # Create SVG subfolder
+    svg_dir = Path(output_dir) / "svg"
+    svg_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Columns to plot
+    columns_to_plot = [
+        'Normalized_Fluorescence_Intensity',
+        'Normalized_Gband_Area',
+        'Normalized_Raman_Peak_850_Area'
+    ]
+    
+    # Get light cycle and transitions from config
+    light_cycle = config.get('metadata', {}).get('light_cycle', 'Constant')
+    light_transition = parse_light_transition_config(config)
+    shade_transition = parse_shade_transition_config(config)
+    treatment_events = parse_treatment_events_config(config)
+    
+    # Determine x-axis type
+    x_axis_type = config.get('timeseries_x_axis', 'datetime')
+    if x_axis_type not in ['datetime', 'scan_number']:
+        x_axis_type = 'datetime'
+    
+    for col in columns_to_plot:
+        if col not in df_original.columns:
+            continue
+        
+        # For spike removal comparison, we compare original vs cleaned (before baseline correction)
+        # The cleaned signal should be in the same column name (spikes are replaced in-place)
+        # But we need to track which points were spikes
+        fig, ax = plt.subplots(figsize=(10, 5))
+        
+        x_values = df_original.index
+        y_original = df_original[col].values
+        y_cleaned = df_cleaned[col].values
+        
+        # Plot original data (gray - with spikes)
+        ax.plot(x_values, y_original, 'o-', color='gray', alpha=0.7, 
+                linewidth=1.5, markersize=4, label=f'{col} (Original)', zorder=2)
+        
+        # Plot cleaned data (blue - spikes removed)
+        ax.plot(x_values, y_cleaned, 's-', color='#1f77b4', alpha=0.8, 
+                linewidth=2, markersize=3, label=f'{col} (Spikes Removed)', zorder=3)
+        
+        # Mark spike points on original data if available
+        if spike_info_dict and col in spike_info_dict:
+            spike_data = spike_info_dict[col]
+            spike_indices = spike_data.get('spike_indices', [])
+            if len(spike_indices) > 0:
+                # Convert to numpy array if needed
+                if not isinstance(spike_indices, np.ndarray):
+                    spike_indices = np.array(spike_indices)
+                
+                # Filter indices to valid range
+                valid_spike_indices = spike_indices[(spike_indices >= 0) & (spike_indices < len(x_values))]
+                
+                if len(valid_spike_indices) > 0:
+                    # Convert spike indices to x-axis values
+                    if isinstance(x_values, pd.DatetimeIndex):
+                        spike_x_values = x_values[valid_spike_indices]
+                    else:
+                        spike_x_values = x_values[valid_spike_indices]
+                    
+                    # Get y-values at spike points (use original values)
+                    spike_y_values = y_original[valid_spike_indices]
+                    
+                    ax.scatter(spike_x_values, spike_y_values, color='red', marker='x', 
+                             s=100, linewidths=3, zorder=4, label=f'Spikes Removed (n={len(valid_spike_indices)})')
+        
+        # Add day/night shading if datetime index
+        if pd.api.types.is_datetime64_any_dtype(df_original.index):
+            add_day_night_shading(ax, x_values.min(), x_values.max(), 
+                                light_cycle=light_cycle, light_transition=light_transition)
+            
+            if light_transition:
+                transition_time = light_transition['transition_datetime']
+                if x_values.min() <= transition_time <= x_values.max():
+                    ax.axvline(transition_time, color='red', linestyle='--', 
+                              linewidth=2, alpha=0.7, label='Light transition')
+            
+            if shade_transition:
+                transition_time = shade_transition['transition_datetime']
+                if x_values.min() <= transition_time <= x_values.max():
+                    label_text = 'Shade transition'
+                    if 'ppfd' in shade_transition:
+                        label_text += f" (PPFD: {shade_transition['ppfd']})"
+                    ax.axvline(transition_time, color='purple', linestyle='--', 
+                              linewidth=2, alpha=0.7, label=label_text)
+            
+            if treatment_events:
+                for event in treatment_events:
+                    event_time = event['datetime']
+                    if x_values.min() <= event_time <= x_values.max():
+                        ax.axvline(event_time, color=event['marker_color'], 
+                                 linestyle=event['marker_style'], linewidth=1.5, 
+                                 alpha=0.6, label=event.get('description', event['event_type']))
+            
+            ax.set_xlabel('Date time (MM-DD HH)', fontsize=14)
+            ax.xaxis.set_major_formatter(DateFormatter('%m-%d %H'))
+            ax.xaxis.set_major_locator(DayLocator())
+            fig.autofmt_xdate()
+        else:
+            ax.set_xlabel('Scan Number', fontsize=14)
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f'{int(x)}'))
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
+        
+        # Clean up column name for labels
+        col_display = col.replace('_', ' ').replace('Normalized ', '')
+        ax.set_ylabel(col_display, fontsize=12, fontweight='bold')
+        ax.set_title(col_display, fontsize=13, fontweight='bold')
+        ax.legend(fontsize=10, loc='best', framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.tick_params(axis='both', labelsize=11)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        plot_filename = f'spike_removal_comparison_{col}.png'
+        plot_path = Path(output_dir) / plot_filename
+        svg_path = svg_dir / f'spike_removal_comparison_{col}.svg'
+        
+        plt.savefig(str(plot_path), dpi=300, bbox_inches='tight', facecolor='white')
+        plt.savefig(str(svg_path), format='svg', bbox_inches='tight', facecolor='white')
+        plt.close()
 
 
 def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='Fluorescence to G-band Ratio'):
@@ -414,8 +589,11 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
     """
     create_dir_if_needed(str(output_dir))
     
+    # Create SVG subfolder
+    svg_dir = Path(output_dir) / "svg"
+    svg_dir.mkdir(parents=True, exist_ok=True)
+    
     if not fft_results or 'peaks' not in fft_results or fft_results['peaks'] is None:
-        print(f"Warning: No FFT results available for {ratio_name}")
         return
     
     # Get ratio column name from results
@@ -424,7 +602,6 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
         ratio_col = 'Fluorescence_to_Gband_Ratio'
     
     if ratio_col not in results_df.columns:
-        print(f"Warning: Ratio column not found for FFT plot")
         return
     
     # Get signal and time data
@@ -432,7 +609,6 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
     mask = ~np.isnan(signal)
     
     if np.sum(mask) < 3:
-        print(f"Warning: Insufficient data for FFT plot")
         return
     
     signal_valid = signal[mask]
@@ -549,10 +725,14 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
     
+    # Clean up ratio name for filename
+    ratio_name_clean = ratio_name.lower().replace(" ", "_").replace("/", "_")
+    
     # Save plot
-    timestamp = datetime.now().strftime("%Y%m%d")
-    plot_filename = f'fft_analysis_{ratio_name.lower().replace(" ", "_").replace("/", "_")}_{timestamp}.png'
+    plot_filename = f'fft_analysis_{ratio_name_clean}.png'
     plot_path = Path(output_dir) / plot_filename
+    svg_path = svg_dir / f'fft_analysis_{ratio_name_clean}.svg'
+    
     plt.savefig(str(plot_path), dpi=300, bbox_inches='tight', facecolor='white')
+    plt.savefig(str(svg_path), format='svg', bbox_inches='tight', facecolor='white')
     plt.close()
-    print(f"FFT analysis plot saved to: {plot_path}")

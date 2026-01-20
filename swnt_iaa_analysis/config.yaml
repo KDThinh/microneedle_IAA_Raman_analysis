@@ -56,6 +56,14 @@ profiles:
       peak_distance: 100  # Minimum distance between detected peaks
       
       # ========================================================================
+      # Spike Removal (Hampel Filter) - Applied before baseline correction
+      # ========================================================================
+      spike_window: 3        # Half-window size for median calculation in spike detection
+      spike_threshold: 3.0   # Threshold in units of MAD (Median Absolute Deviation) for outlier detection
+      spike_min_length: 1    # Minimum consecutive points to consider as a spike (in scans)
+      spike_max_length: 50   # Maximum consecutive points to replace as one spike (increase to catch long spikes)
+      
+      # ========================================================================
       # Baseline Drift Correction (for time-series data - step discontinuity removal)
       # ========================================================================
       baseline_correction_threshold: 15       # MAD threshold multiplier for jump detection
@@ -120,6 +128,26 @@ profiles:
   # IN PLANTA PROFILES - For plant-based experiments
   # Data location: IAA Nanosensor Experiment/In planta/
   # ============================================================================
+  Arabidopsis_control_Constant_Temp_Hum_Const_Run1:
+    description: Arabidopsis Control treatment, Constant light cycle, constant temp/humidity (Temp_Hum_Control - controlled and recorded), Run 4, done at TLL
+    inherits: processing_default
+    data_source:
+      raman_relative_path: IAA Nanosensor Experiment/In planta/Arabidopsis/Treatment_Control/Light_Constant/Temp_Hum_Constant/Run 1/Raw data/Run 4.txt
+    metadata:
+      experiment: in planta
+      plant_type: Arabidopsis
+      treatment: Control
+      temp_hum_control: Yes
+      light_cycle: Constant
+      replicate_number: 1
+        # Light cycle transition: started with 8to24, switched to Constant on 8 Aug 2025, 4 pm
+    light_transition:
+      transition_datetime: "2026-01-12 12:00:00"  # Format: YYYY-MM-DD HH:MM:SS
+      initial_light_cycle: "8to24"
+      final_light_cycle: "Constant"
+    outputs:
+      timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
+
 
   # Exa Bok Choy Control Run 1
   bokchoy_control_6to22_Temp_Hum_Variable_Run1:
@@ -269,7 +297,24 @@ profiles:
       light_cycle: 8to24
       replicate_number: 2
     processing:
-      recorded_excitation_nm: 840
+      recorded_excitation_nm: 835
+      # ========================================================================
+      # Spike Removal (Hampel Filter) - Applied before baseline correction
+      # ========================================================================
+      spike_window: 5        # Half-window size for median calculation in spike detection
+      spike_threshold: 10.0   # Threshold in units of MAD (Median Absolute Deviation) for outlier detection
+      
+      # ========================================================================
+      # Baseline Drift Correction (for time-series data - step discontinuity removal)
+      # ========================================================================
+      baseline_correction_threshold: 15       # MAD threshold multiplier for jump detection
+      baseline_correction_window: 2           # Number of points to average before/after jump for offset calculation
+      baseline_correction_smooth_first: true   # If True, smooth signal before jump detection
+      baseline_correction_smooth_window: 5    # Window size for Savitzky-Golay smoothing before jump detection (must be odd)
+      baseline_correction_smooth_poly_order: 2 # Polynomial order for Savitzky-Golay smoothing before jump detection
+      baseline_correction_correct_smoothed: true # If True, apply correction to smoothed signal; if False, to original signal
+      baseline_detect_cumulative_jumps: true  # If True, also detect gradual jumps over multiple consecutive points
+      baseline_cumulative_window: 5           # Window size for detecting cumulative/gradual jumps (total change over N consecutive points)
     outputs:
       timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
 

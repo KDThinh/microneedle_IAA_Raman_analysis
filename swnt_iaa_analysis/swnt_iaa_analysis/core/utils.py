@@ -113,6 +113,8 @@ def remove_spikes_hampel(signal, window_size=5, threshold=3.0, min_spike_length=
     indices_valid = np.where(valid_mask)[0]
     
     # Calculate median and MAD for each point using rolling window
+    # Use a robust approach that (when possible) excludes the current point
+    # from the median estimate so that large spikes do not bias the window.
     n = len(signal_valid)
     median_values = np.zeros(n)
     mad_values = np.zeros(n)
@@ -124,10 +126,22 @@ def remove_spikes_hampel(signal, window_size=5, threshold=3.0, min_spike_length=
         
         window_data = signal_valid[start_idx:end_idx]
         
-        # Calculate median
-        median_values[i] = np.median(window_data)
+        # Calculate median, preferring to exclude the current point i from the window
+        # when there are enough neighbouring points. This makes the estimator
+        # more robust to large spikes that otherwise dominate the local window.
+        if len(window_data) > 1:
+            # Build window without the current point (if it lies inside the window)
+            window_without_i = np.concatenate(
+                [signal_valid[start_idx:i], signal_valid[i + 1:end_idx]]
+            )
+            if len(window_without_i) > 0:
+                median_values[i] = np.median(window_without_i)
+            else:
+                median_values[i] = np.median(window_data)
+        else:
+            median_values[i] = np.median(window_data)
         
-        # Calculate MAD (Median Absolute Deviation)
+        # Calculate MAD (Median Absolute Deviation) relative to this robust median
         deviations = np.abs(window_data - median_values[i])
         mad_values[i] = np.median(deviations)
     

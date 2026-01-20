@@ -4,7 +4,7 @@ Professional Python package for analyzing Single-Walled Carbon Nanotube (SWNT) I
 
 ## Overview
 
-The `swnt-iaa-analysis` package provides a complete pipeline for processing Raman spectroscopy data from SWNT-IAA nanosensor experiments. It handles spectral preprocessing, peak detection, ratio calculations, signal corrections, and frequency-domain analysis (FFT) to extract meaningful biological signals from raw spectroscopic measurements.
+The `swnt_iaa_analysis` package provides a complete pipeline for processing Raman spectroscopy data from SWNT-IAA nanosensor experiments. It handles spectral preprocessing, peak detection, ratio calculations, signal corrections, and frequency-domain analysis (FFT) to extract meaningful biological signals from raw spectroscopic measurements.
 
 Key features:
 - **Spectral Processing**: Savitzky-Golay smoothing and Lieberfit baseline correction
@@ -24,7 +24,7 @@ cd swnt_iaa_analysis
 pip install -e .
 ```
 
-This will install the package and make it available as `swnt-iaa-analysis` command.
+This will install the package and make it available as `swnt_iaa_analysis` command.
 
 ## Usage
 
@@ -35,7 +35,7 @@ The package provides three main commands for analyzing Raman spectroscopy data:
 #### 1. Analyze a Single Profile
 
 ```bash
-swnt-iaa-analysis analyze <profile_name> [options]
+swnt_iaa_analysis analyze <profile_name> [options]
 ```
 
 **Process Flow:**
@@ -135,14 +135,14 @@ When the `analyze` command is invoked, the following detailed process occurs:
 
 **Example:**
 ```bash
-swnt-iaa-analysis analyze bokchoy_control_6to22_Temp_Hum_Variable_Run1
-swnt-iaa-analysis analyze bokchoy_control_6to22_Temp_Hum_Variable_Run1 --output ./my_results --algorithm v4
+swnt_iaa_analysis analyze bokchoy_control_6to22_Temp_Hum_Variable_Run1
+swnt_iaa_analysis analyze bokchoy_control_6to22_Temp_Hum_Variable_Run1 --output ./my_results --algorithm v4
 ```
 
 #### 2. List Available Profiles
 
 ```bash
-swnt-iaa-analysis list-profiles [options]
+swnt_iaa_analysis list-profiles-cmd [options]
 ```
 
 **Process Flow:**
@@ -165,14 +165,14 @@ swnt-iaa-analysis list-profiles [options]
 
 **Example:**
 ```bash
-swnt-iaa-analysis list-profiles
-swnt-iaa-analysis list-profiles --experiment "in planta"
+swnt_iaa_analysis list-profiles-cmd
+swnt_iaa_analysis list-profiles-cmd --experiment "in planta"
 ```
 
 #### 3. Batch Process Multiple Profiles
 
 ```bash
-swnt-iaa-analysis batch-process [options]
+swnt_iaa_analysis batch-process [options]
 ```
 
 **Process Flow:**
@@ -206,8 +206,8 @@ swnt-iaa-analysis batch-process [options]
 
 **Example:**
 ```bash
-swnt-iaa-analysis batch-process --experiment "in planta"
-swnt-iaa-analysis batch-process --profiles "profile1,profile2,profile3" --algorithm v4
+swnt_iaa_analysis batch-process --experiment "in planta"
+swnt_iaa_analysis batch-process --profiles "profile1,profile2,profile3" --algorithm v4
 ```
 
 ### Python API

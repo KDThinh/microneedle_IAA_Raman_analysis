@@ -2,9 +2,10 @@
 
 import os
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import json
 
 import numpy as np
@@ -18,8 +19,8 @@ from .analysis.peaks import find_peak_lorentzian
 from .analysis.ratios import calculate_ratios
 from .analysis.fourier import compute_fourier_transform, compute_diurnal_average
 from .io.config import load_profile_config
-from .io.exporter import export_results, export_fft_results
-from .visualization.plotting import plot_ratio_timeseries, plot_signal_correction_comparison, plot_representative_raman_spectrum, plot_fft_analysis
+from .io.exporter import export_results, export_fft_results, load_processed_data
+from .visualization.plotting import plot_ratio_timeseries, plot_signal_correction_comparison, plot_representative_raman_spectrum, plot_fft_analysis, plot_spike_removal_comparison
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +90,11 @@ class RamanPipeline:
     
     def run(self):
         """Run the complete analysis pipeline."""
+        start_time = time.time()
         logger.info("Starting pipeline execution...")
         
         # 1. Load data
+        print("Loading Raman dataset...")
         logger.info("Loading Raman dataset...")
         self.dataset = load_raman_dataset(self.config)
         
@@ -127,48 +130,63 @@ class RamanPipeline:
             logger.info("No temperature data configured or found")
         
         # 2. Process scans
+        print(f"Processing scans using algorithm {self.algorithm}...")
         logger.info(f"Processing scans using algorithm {self.algorithm}...")
         if self.algorithm == 'v4':
             self.results = self._process_v4()
         else:
             self.results = self._process_v3()
+        print(f"  Processed {len(self.results)} scans")
         
         # 2a. Apply signal corrections (spike removal and baseline correction) for v4
         if self.algorithm == 'v4':
+            print("Applying signal corrections (spike removal and baseline correction)...")
             logger.info("Applying signal corrections (spike removal and baseline correction)...")
             # Store original data for comparison plots (original columns are preserved, corrected ones created with _BaselineCorrected suffix)
             results_original = self.results.copy()
-            self.results, jump_info_dict = self._apply_signal_corrections(self.results)
+            self.results, jump_info_dict, spike_info_dict, results_after_spikes = self._apply_signal_corrections(self.results)
             # Plot before/after comparison
+            print("Generating spike removal comparison plots...")
+            logger.info("Generating spike removal comparison plots...")
+            plot_spike_removal_comparison(results_original, results_after_spikes, self.output_dir, self.config, spike_info_dict)
+            print("Generating signal correction comparison plots...")
             logger.info("Generating signal correction comparison plots...")
             plot_signal_correction_comparison(results_original, self.results, self.output_dir, self.config, jump_info_dict)
         
         # 3. Calculate ratios
+        print("Calculating ratios...")
         logger.info("Calculating ratios...")
         self.results = calculate_ratios(self.results)
         
         # 4. Analyze (FFT)
+        print("Computing Fourier transforms...")
         logger.info("Computing Fourier transforms...")
         self.fft_results = self._compute_fft()
         
         # 5. Export and plot
+        print("Exporting results...")
         logger.info("Exporting results...")
         self._export_results()
+        print("Generating plots...")
+        logger.info("Generating plots...")
         self._plot_results()
         
         # 5a. Plot representative Raman spectrum (for v4)
         if self.algorithm == 'v4' and self.representative_spectrum_data is not None:
+            print("Generating representative Raman spectrum plot...")
             logger.info("Generating representative Raman spectrum plot...")
             plot_representative_raman_spectrum(self.representative_spectrum_data, self.output_dir, self.config)
         
         # 5b. Plot FFT analysis (for v4)
         if self.algorithm == 'v4' and self.fft_results:
+            print("Generating FFT analysis plots...")
             logger.info("Generating FFT analysis plots...")
             for key, fft_result in self.fft_results.items():
                 ratio_name = 'Fluorescence to G-band Ratio' if key == 'gband' else f'Ratio ({key})'
                 plot_fft_analysis(self.results, fft_result, self.output_dir, self.config, ratio_name=ratio_name)
         
-        logger.info("Pipeline execution complete!")
+        elapsed_time = time.time() - start_time
+        logger.info(f"Pipeline execution complete! Elapsed time: {elapsed_time:.2f} seconds")
         return self.results
     
     def _process_v4(self) -> pd.DataFrame:
@@ -353,6 +371,8 @@ class RamanPipeline:
         
         spike_window = get_param('spike_window', default=5)
         spike_threshold = get_param('spike_threshold', default=3.0)
+        spike_min_length = get_param('spike_min_length', default=1)
+        spike_max_length = get_param('spike_max_length', default=10)
         baseline_threshold_multiplier = (get_param('baseline_correction_threshold') or
                                         get_param('baseline_threshold_multiplier', default=5.0))
         baseline_window_size = (get_param('baseline_correction_window') or
@@ -381,7 +401,9 @@ class RamanPipeline:
         ]
         
         df_corrected = df.copy()
+        df_after_spikes = df.copy()  # Store data after spike removal but before baseline correction
         jump_info_dict = {}  # Store jump information for each column
+        spike_info_dict = {}  # Store spike information for each column
         df_jump_indices_shared = np.array([], dtype=int)  # Shared jump indices in DataFrame space
         
         # Process reference column first to detect jumps
@@ -401,7 +423,9 @@ class RamanPipeline:
                 cleaned_signal_ref, spike_mask_ref = remove_spikes_hampel(
                     signal_valid_ref,
                     window_size=spike_window,
-                    threshold=spike_threshold
+                    threshold=spike_threshold,
+                    min_spike_length=spike_min_length,
+                    max_spike_length=spike_max_length,
                 )
                 n_spikes_ref = np.sum(spike_mask_ref)
                 if n_spikes_ref > 0:
@@ -429,14 +453,25 @@ class RamanPipeline:
                     df_jump_indices_shared = np.array([], dtype=int)
                     logger.info(f"  No baseline jumps detected on {reference_column}")
                 
-                # Store results for reference column
+                # Store spike-removed version (before baseline correction) for comparison plots
+                cleaned_full_ref = np.full_like(signal_ref, np.nan)
+                cleaned_full_ref[mask_ref] = cleaned_signal_ref
+                df_after_spikes[reference_column] = cleaned_full_ref
+                
+                # Store results for reference column (after baseline correction)
                 corrected_full_ref = np.full_like(signal_ref, np.nan)
                 corrected_full_ref[mask_ref] = corrected_signal_ref
                 corrected_col_name_ref = reference_column + '_BaselineCorrected'
                 df_corrected[corrected_col_name_ref] = corrected_full_ref
+                
+                # Map spike indices from valid signal space to DataFrame indices
+                df_spike_indices_ref = valid_indices_ref[spike_mask_ref] if np.sum(spike_mask_ref) > 0 else np.array([], dtype=int)
                 jump_info_dict[reference_column] = {
                     'jump_indices': df_jump_indices_shared,
                     'jump_info': jump_info_ref
+                }
+                spike_info_dict[reference_column] = {
+                    'spike_indices': df_spike_indices_ref
                 }
         
         # Process all columns (reference column is skipped if already processed)
@@ -466,11 +501,24 @@ class RamanPipeline:
             cleaned_signal, spike_mask = remove_spikes_hampel(
                 signal_valid,
                 window_size=spike_window,
-                threshold=spike_threshold
+                threshold=spike_threshold,
+                min_spike_length=spike_min_length,
+                max_spike_length=spike_max_length,
             )
             n_spikes = np.sum(spike_mask)
             if n_spikes > 0:
                 logger.info(f"  Removed {n_spikes} spike(s) from {col}")
+            
+            # Map spike indices from valid signal space to DataFrame indices
+            df_spike_indices = valid_indices[spike_mask] if np.sum(spike_mask) > 0 else np.array([], dtype=int)
+            spike_info_dict[col] = {
+                'spike_indices': df_spike_indices
+            }
+            
+            # Store spike-removed version (before baseline correction) for comparison plots
+            cleaned_full = np.full_like(signal, np.nan)
+            cleaned_full[mask] = cleaned_signal
+            df_after_spikes[col] = cleaned_full
             
             # Step 2: Correct baseline shifts
             if col == reference_column:
@@ -569,7 +617,7 @@ class RamanPipeline:
             
             # Original column remains unchanged (will be included in CSV export)
         
-        return df_corrected, jump_info_dict
+        return df_corrected, jump_info_dict, spike_info_dict, df_after_spikes
     
     def _process_v3(self) -> pd.DataFrame:
         """
@@ -659,6 +707,154 @@ class RamanPipeline:
                 fft_results['gband'] = fft_result
         
         return fft_results
+    
+    def reprocess_from_csv(
+        self,
+        csv_path: Path,
+        steps: List[str] = None,
+        output_dir: Optional[str] = None
+    ) -> pd.DataFrame:
+        """
+        Re-process existing processed_data.csv with selective steps.
+        
+        This method allows re-running time-series signal processing steps without
+        re-running the time-consuming spectral processing.
+        
+        Parameters:
+        -----------
+        csv_path : Path
+            Path to processed_data.csv file
+        steps : list of str, optional
+            List of steps to run. Valid steps:
+            - 'spike_removal': Apply spike removal to normalized intensity columns
+            - 'baseline_correction': Apply baseline correction
+            - 'ratios': Recalculate ratios (requires spike_removal + baseline_correction)
+            - 'fft': Recompute FFT analysis (requires ratios)
+            If None, runs all steps.
+        output_dir : str, optional
+            Output directory. If None, creates new timestamped folder.
+        
+        Returns:
+        --------
+        pd.DataFrame
+            Re-processed results DataFrame
+        """
+        if steps is None:
+            steps = ['spike_removal', 'baseline_correction', 'ratios', 'fft']
+        
+        start_time = time.time()
+        logger.info(f"Starting re-processing from CSV: {csv_path}")
+        
+        # Load processed data (do this once for validation and processing)
+        print("Loading processed data from CSV...")
+        logger.info("Loading processed data from CSV...")
+        self.results = load_processed_data(csv_path)
+        
+        # Validate step dependencies after loading
+        if 'ratios' in steps and ('spike_removal' not in steps or 'baseline_correction' not in steps):
+            # Check if baseline-corrected columns already exist
+            has_baseline_corrected = any('_BaselineCorrected' in col for col in self.results.columns)
+            if not has_baseline_corrected:
+                raise ValueError(
+                    "Step 'ratios' requires 'spike_removal' and 'baseline_correction'. "
+                    "Either include those steps or ensure baseline-corrected columns exist in the CSV."
+                )
+        
+        if 'fft' in steps and 'ratios' not in steps:
+            has_ratios = any('Ratio' in col for col in self.results.columns)
+            if not has_ratios:
+                raise ValueError(
+                    "Step 'fft' requires 'ratios'. "
+                    "Either include 'ratios' step or ensure ratio columns exist in the CSV."
+                )
+        
+        # Ensure index type matches config preference (if needed)
+        # Note: The CSV might have been saved with a different index type than the config
+        # For re-processing, we'll use whatever index is in the CSV
+        # But we need to ensure we have the necessary columns for FFT (requires datetime)
+        # FFT will handle this by checking x_axis_type in _compute_fft
+        
+        # Extract original columns if re-processing signal corrections
+        if 'spike_removal' in steps or 'baseline_correction' in steps:
+            # Remove existing _BaselineCorrected columns to start fresh
+            baseline_corrected_cols = [col for col in self.results.columns if col.endswith('_BaselineCorrected')]
+            if baseline_corrected_cols:
+                logger.info(f"Removing existing baseline-corrected columns: {baseline_corrected_cols}")
+                self.results = self.results.drop(columns=baseline_corrected_cols)
+        
+        # Setup output directory
+        if output_dir is None:
+            # Create new timestamped folder in same location as source CSV
+            source_dir = csv_path.parent
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_dir = str(source_dir / f"results_v4_{timestamp}_reprocess")
+        
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Output directory: {self.output_dir}")
+        
+        # Store original for comparison plots
+        results_original = self.results.copy() if ('spike_removal' in steps or 'baseline_correction' in steps) else None
+        
+        # Apply selected processing steps
+        jump_info_dict = None
+        spike_info_dict = None
+        
+        if 'spike_removal' in steps or 'baseline_correction' in steps:
+            print("Applying signal corrections (spike removal and baseline correction)...")
+            logger.info("Applying signal corrections...")
+            self.results, jump_info_dict, spike_info_dict, results_after_spikes = self._apply_signal_corrections(self.results)
+            
+            if results_original is not None:
+                # Generate spike removal comparison plot if spike removal was performed
+                if 'spike_removal' in steps and spike_info_dict:
+                    print("Generating spike removal comparison plots...")
+                    logger.info("Generating spike removal comparison plots...")
+                    plot_spike_removal_comparison(results_original, results_after_spikes, self.output_dir, self.config, spike_info_dict)
+                
+                # Generate signal correction comparison plot (includes baseline correction)
+                if 'baseline_correction' in steps:
+                    print("Generating signal correction comparison plots...")
+                    logger.info("Generating signal correction comparison plots...")
+                    plot_signal_correction_comparison(results_original, self.results, self.output_dir, self.config, jump_info_dict)
+        
+        if 'ratios' in steps:
+            print("Calculating ratios...")
+            logger.info("Calculating ratios...")
+            # Remove existing ratio columns if re-calculating
+            ratio_cols = [col for col in self.results.columns if 'Ratio' in col]
+            if ratio_cols:
+                logger.info(f"Removing existing ratio columns: {ratio_cols}")
+                self.results = self.results.drop(columns=ratio_cols)
+            self.results = calculate_ratios(self.results)
+        
+        if 'fft' in steps:
+            print("Computing Fourier transforms...")
+            logger.info("Computing Fourier transforms...")
+            self.fft_results = self._compute_fft()
+        else:
+            self.fft_results = None
+        
+        # Export and plot
+        print("Exporting results...")
+        logger.info("Exporting results...")
+        self._export_results()
+        
+        print("Generating plots...")
+        logger.info("Generating plots...")
+        self._plot_results()
+        
+        if self.fft_results:
+            print("Generating FFT analysis plots...")
+            logger.info("Generating FFT analysis plots...")
+            for key, fft_result in self.fft_results.items():
+                ratio_name = 'Fluorescence to G-band Ratio' if key == 'gband' else f'Ratio ({key})'
+                plot_fft_analysis(self.results, fft_result, self.output_dir, self.config, ratio_name=ratio_name)
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"Re-processing complete! Elapsed time: {elapsed_time:.2f} seconds")
+        
+        return self.results
     
     def _export_results(self):
         """Export results to files."""

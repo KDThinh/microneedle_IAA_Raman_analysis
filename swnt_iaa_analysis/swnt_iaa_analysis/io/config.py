@@ -2,6 +2,8 @@
 
 import copy
 import os
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -181,4 +183,75 @@ def list_profiles(
         matching_profiles.append(profile_name)
     
     return sorted(matching_profiles)
+
+
+def find_latest_results_folder(config_path: str, profile_name: str) -> Optional[Path]:
+    """
+    Find the latest results_v4_* folder for a given profile.
+    
+    Strategy:
+    1. Load profile config to get data file path
+    2. Look in the data file's parent directory for results_v4_* folders
+    3. Return the most recent one (by timestamp in folder name)
+    
+    Parameters:
+    -----------
+    config_path : str
+        Path to YAML config file
+    profile_name : str
+        Name of profile to find results for
+    
+    Returns:
+    --------
+    Path or None
+        Path to latest results folder, or None if not found
+    """
+    # Load config to get data file location
+    try:
+        config = load_profile_config(config_path, profile_name)
+    except ConfigError:
+        return None
+    
+    # Get data file path from config
+    data_source = config.get('data_source', {})
+    raman_path_str = data_source.get('raman_relative_path')
+    
+    if not raman_path_str:
+        return None
+    
+    # Resolve path (using same logic as loader)
+    from ..core.loader import resolve_path
+    raman_path = resolve_path(raman_path_str)
+    
+    if not raman_path or not raman_path.exists():
+        return None
+    
+    # Look in the parent directory for results_v4_* folders
+    data_dir = raman_path.parent
+    
+    # Find all results_v4_* folders
+    pattern = re.compile(r'results_v4_\d{8}_\d{6}$')
+    results_folders = []
+    
+    for item in data_dir.iterdir():
+        if item.is_dir() and pattern.match(item.name):
+            results_folders.append(item)
+    
+    if not results_folders:
+        return None
+    
+    # Sort by modification time (newest first) as fallback
+    # But prefer sorting by timestamp in name for consistency
+    def get_timestamp(folder_path: Path) -> tuple:
+        """Extract timestamp from folder name for sorting."""
+        match = re.search(r'(\d{8})_(\d{6})', folder_path.name)
+        if match:
+            date_str, time_str = match.groups()
+            return (date_str, time_str)
+        # Fallback to modification time if no timestamp found
+        return (0, 0)
+    
+    results_folders.sort(key=get_timestamp, reverse=True)
+    
+    return results_folders[0]
 
