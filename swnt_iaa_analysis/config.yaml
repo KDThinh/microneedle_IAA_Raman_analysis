@@ -61,7 +61,15 @@ profiles:
       spike_window: 3        # Half-window size for median calculation in spike detection
       spike_threshold: 3.0   # Threshold in units of MAD (Median Absolute Deviation) for outlier detection
       spike_min_length: 1    # Minimum consecutive points to consider as a spike (in scans)
-      spike_max_length: 50   # Maximum consecutive points to replace as one spike (increase to catch long spikes)
+      spike_max_length: 200   # Maximum consecutive points to replace as one spike (increase to catch long spikes)
+      
+      # ========================================================================
+      # Time-series Smoothing Selection (before spike removal)
+      # ========================================================================
+      timeseries_smoothing_method: savitzky  # 'savitzky' or 'gaussian'
+      timeseries_sg_window: 15       # Window size for Savitzky-Golay smoothing of time-series (must be odd)
+      timeseries_sg_poly_order: 2   # Polynomial order for Savitzky-Golay smoothing of time-series
+      timeseries_gaussian_sigma: 10         # Sigma for Gaussian smoothing if method='gaussian'
       
       # ========================================================================
       # Baseline Drift Correction (for time-series data - step discontinuity removal)

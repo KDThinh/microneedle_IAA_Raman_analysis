@@ -13,14 +13,14 @@ import pandas as pd
 
 from .core.loader import load_raman_dataset, load_temperature_data
 from .core.preprocessing import apply_savgol_filter
-from .core.baseline import lieberfit
-from .core.utils import remove_spikes_hampel, correct_baseline_shifts, apply_corrections_at_jump_indices
+from .core.baseline import lieberfit, apply_gaussian_smoothing
+from .core.utils import remove_spikes_hampel, correct_baseline_shifts, apply_corrections_at_jump_indices, smooth_signal
 from .analysis.peaks import find_peak_lorentzian
 from .analysis.ratios import calculate_ratios
 from .analysis.fourier import compute_fourier_transform, compute_diurnal_average
 from .io.config import load_profile_config
 from .io.exporter import export_results, export_fft_results, load_processed_data
-from .visualization.plotting import plot_ratio_timeseries, plot_signal_correction_comparison, plot_representative_raman_spectrum, plot_fft_analysis, plot_spike_removal_comparison
+from .visualization.plotting import plot_ratio_timeseries, plot_signal_correction_comparison, plot_representative_raman_spectrum, plot_fft_analysis, plot_spike_removal_comparison, plot_processing_stages
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,9 @@ class RamanPipeline:
             print("Generating signal correction comparison plots...")
             logger.info("Generating signal correction comparison plots...")
             plot_signal_correction_comparison(results_original, self.results, self.output_dir, self.config, jump_info_dict)
+            print("Generating processing stages plots...")
+            logger.info("Generating processing stages plots...")
+            plot_processing_stages(results_original, results_after_spikes, self.results, self.output_dir, self.config)
         
         # 3. Calculate ratios
         print("Calculating ratios...")
@@ -373,6 +376,10 @@ class RamanPipeline:
         spike_threshold = get_param('spike_threshold', default=3.0)
         spike_min_length = get_param('spike_min_length', default=1)
         spike_max_length = get_param('spike_max_length', default=10)
+        timeseries_sg_window = get_param('timeseries_sg_window', default=5)
+        timeseries_sg_poly_order = get_param('timeseries_sg_poly_order', default=2)
+        timeseries_smoothing_method = get_param('timeseries_smoothing_method', default='savitzky').lower()
+        timeseries_gaussian_sigma = get_param('timeseries_gaussian_sigma', default=10)
         baseline_threshold_multiplier = (get_param('baseline_correction_threshold') or
                                         get_param('baseline_threshold_multiplier', default=5.0))
         baseline_window_size = (get_param('baseline_correction_window') or
@@ -416,12 +423,24 @@ class RamanPipeline:
             if np.sum(mask_ref) >= 3:
                 # Extract valid signal
                 signal_valid_ref = signal_ref[mask_ref]
+                # Apply chosen smoothing for spike detection
+                if timeseries_smoothing_method == 'gaussian':
+                    signal_valid_ref_sg = apply_gaussian_smoothing(
+                        signal_valid_ref,
+                        sigma=timeseries_gaussian_sigma,
+                    )
+                else:
+                    signal_valid_ref_sg = smooth_signal(
+                        signal_valid_ref,
+                        window_size=timeseries_sg_window,
+                        poly_order=timeseries_sg_poly_order,
+                    )
                 valid_indices_ref = np.where(mask_ref)[0]
                 
                 # Remove spikes from reference
                 logger.info(f"Removing spikes from {reference_column}...")
                 cleaned_signal_ref, spike_mask_ref = remove_spikes_hampel(
-                    signal_valid_ref,
+                    signal_valid_ref_sg,
                     window_size=spike_window,
                     threshold=spike_threshold,
                     min_spike_length=spike_min_length,
@@ -494,12 +513,24 @@ class RamanPipeline:
             
             # Extract valid signal
             signal_valid = signal[mask]
+            # Apply chosen smoothing for spike detection
+            if timeseries_smoothing_method == 'gaussian':
+                signal_valid_sg = apply_gaussian_smoothing(
+                    signal_valid,
+                    sigma=timeseries_gaussian_sigma,
+                )
+            else:
+                signal_valid_sg = smooth_signal(
+                    signal_valid,
+                    window_size=timeseries_sg_window,
+                    poly_order=timeseries_sg_poly_order,
+                )
             valid_indices = np.where(mask)[0]
             
             # Step 1: Remove spikes
             logger.info(f"Removing spikes from {col}...")
             cleaned_signal, spike_mask = remove_spikes_hampel(
-                signal_valid,
+                signal_valid_sg,
                 window_size=spike_window,
                 threshold=spike_threshold,
                 min_spike_length=spike_min_length,
@@ -817,6 +848,10 @@ class RamanPipeline:
                     print("Generating signal correction comparison plots...")
                     logger.info("Generating signal correction comparison plots...")
                     plot_signal_correction_comparison(results_original, self.results, self.output_dir, self.config, jump_info_dict)
+                # Always generate processing stages plot when we have spike & baseline info
+                print("Generating processing stages plots...")
+                logger.info("Generating processing stages plots...")
+                plot_processing_stages(results_original, results_after_spikes, self.results, self.output_dir, self.config)
         
         if 'ratios' in steps:
             print("Calculating ratios...")

@@ -22,8 +22,10 @@ from ..core.utils import (
     parse_light_transition_config,
     parse_shade_transition_config,
     parse_treatment_events_config,
-    add_day_night_shading
+    add_day_night_shading,
+    smooth_signal,
 )
+from ..core.baseline import apply_gaussian_smoothing
 
 
 def _add_shading_for_cycle(ax, start_time, end_time, light_cycle, is_first=False):
@@ -736,3 +738,134 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
     plt.savefig(str(plot_path), dpi=300, bbox_inches='tight', facecolor='white')
     plt.savefig(str(svg_path), format='svg', bbox_inches='tight', facecolor='white')
     plt.close()
+
+
+def plot_processing_stages(df_original, df_after_spikes, df_corrected, output_dir, config):
+    """
+    Plot overlaid time-series showing processing stages:
+    - Raw data
+    - Savitzky-Golay smoothed data
+    - Spike-removed data (Hampel)
+    - Baseline-corrected data
+    """
+    create_dir_if_needed(str(output_dir))
+
+    # Create SVG subfolder
+    svg_dir = Path(output_dir) / "svg"
+    svg_dir.mkdir(parents=True, exist_ok=True)
+
+    # Columns to plot
+    columns_to_plot = [
+        'Normalized_Fluorescence_Intensity',
+        'Normalized_Gband_Area',
+        'Normalized_Raman_Peak_850_Area'
+    ]
+
+    # Get smoothing parameters for time-series smoothing
+    processing_cfg = config.get('processing', {}) or config.get('sections', {}).get('processing', {})
+    ts_sg_window = processing_cfg.get('timeseries_sg_window', config.get('timeseries_sg_window', 5))
+    ts_sg_poly_order = processing_cfg.get('timeseries_sg_poly_order', config.get('timeseries_sg_poly_order', 2))
+    ts_method = processing_cfg.get('timeseries_smoothing_method', config.get('timeseries_smoothing_method', 'savitzky')).lower()
+    ts_gaussian_sigma = processing_cfg.get('timeseries_gaussian_sigma', config.get('timeseries_gaussian_sigma', 10))
+
+    # Get light cycle and transitions from config
+    light_cycle = config.get('metadata', {}).get('light_cycle', 'Constant')
+    light_transition = parse_light_transition_config(config)
+    shade_transition = parse_shade_transition_config(config)
+    treatment_events = parse_treatment_events_config(config)
+
+    for col in columns_to_plot:
+        if col not in df_original.columns:
+            continue
+
+        corrected_col_name = col + '_BaselineCorrected'
+        if corrected_col_name not in df_corrected.columns:
+            continue
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        x_values = df_original.index
+        y_raw = df_original[col].values
+
+        # Time-series smoothed data (Savitzky-Golay or Gaussian)
+        if ts_method == 'gaussian':
+            y_smooth = apply_gaussian_smoothing(y_raw.copy(), sigma=ts_gaussian_sigma)
+        else:
+            y_smooth = smooth_signal(y_raw.copy(), window_size=ts_sg_window, poly_order=ts_sg_poly_order)
+
+        # Spike-removed data (after Hampel, before baseline correction)
+        if col in df_after_spikes.columns:
+            y_spikes_removed = df_after_spikes[col].values
+        else:
+            y_spikes_removed = y_smooth
+
+        # Baseline-corrected data
+        y_baseline_corrected = df_corrected[corrected_col_name].values
+
+        # Plot raw (no markers, transparent)
+        ax.plot(x_values, y_raw, color='gray', linewidth=1.0, alpha=0.4, label='Raw')
+
+        # Plot smoothed series
+        label_smooth = 'Gaussian' if ts_method == 'gaussian' else 'Savitzky-Golay'
+        ax.plot(x_values, y_smooth, color='#1f77b4', linewidth=1.5, alpha=0.7, label=label_smooth)
+
+        # Plot spike-removed
+        ax.plot(x_values, y_spikes_removed, color='green', linewidth=1.5, alpha=0.8, label='Hampel (Spikes Removed)')
+
+        # Plot baseline-corrected
+        ax.plot(x_values, y_baseline_corrected, color='red', linewidth=1.8, alpha=0.9, label='Baseline Corrected')
+
+        # Add day/night shading if datetime index
+        if pd.api.types.is_datetime64_any_dtype(df_original.index):
+            add_day_night_shading(ax, x_values.min(), x_values.max(),
+                                  light_cycle=light_cycle, light_transition=light_transition)
+
+            if light_transition:
+                transition_time = light_transition['transition_datetime']
+                if x_values.min() <= transition_time <= x_values.max():
+                    ax.axvline(transition_time, color='red', linestyle='--',
+                               linewidth=2, alpha=0.7, label='Light transition')
+
+            if shade_transition:
+                transition_time = shade_transition['transition_datetime']
+                if x_values.min() <= transition_time <= x_values.max():
+                    label_text = 'Shade transition'
+                    if 'ppfd' in shade_transition:
+                        label_text += f" (PPFD: {shade_transition['ppfd']})"
+                    ax.axvline(transition_time, color='purple', linestyle='--',
+                               linewidth=2, alpha=0.7, label=label_text)
+
+            if treatment_events:
+                for event in treatment_events:
+                    event_time = event['datetime']
+                    if x_values.min() <= event_time <= x_values.max():
+                        ax.axvline(event_time, color=event['marker_color'],
+                                   linestyle=event['marker_style'], linewidth=1.5,
+                                   alpha=0.6, label=event.get('description', event['event_type']))
+
+            ax.set_xlabel('Date time (MM-DD HH)', fontsize=14)
+            ax.xaxis.set_major_formatter(DateFormatter('%m-%d %H'))
+            ax.xaxis.set_major_locator(DayLocator())
+            fig.autofmt_xdate()
+        else:
+            ax.set_xlabel('Scan Number', fontsize=14)
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f'{int(x)}'))
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
+
+        # Clean up column name for labels
+        col_display = col.replace('_', ' ').replace('Normalized ', '')
+        ax.set_ylabel(col_display, fontsize=12, fontweight='bold')
+        ax.set_title(f'{col_display} - Processing Stages', fontsize=13, fontweight='bold')
+        ax.legend(fontsize=10, loc='best', framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.tick_params(axis='both', labelsize=11)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        plot_filename = f'processing_stages_{col}.png'
+        plot_path = Path(output_dir) / plot_filename
+        svg_path = svg_dir / f'processing_stages_{col}.svg'
+
+        plt.savefig(str(plot_path), dpi=300, bbox_inches='tight', facecolor='white')
+        plt.savefig(str(svg_path), format='svg', bbox_inches='tight', facecolor='white')
+        plt.close()
