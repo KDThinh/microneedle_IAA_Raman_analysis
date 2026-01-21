@@ -25,7 +25,7 @@ from ..core.utils import (
     add_day_night_shading,
     smooth_signal,
 )
-from ..core.baseline import apply_gaussian_smoothing
+from ..core.baseline import apply_gaussian_smoothing, apply_als_baseline
 
 
 def _add_shading_for_cycle(ax, start_time, end_time, light_cycle, is_first=False):
@@ -634,7 +634,7 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
         # Interpolate magnitude (simplified)
         magnitude = np.interp(positive_freqs, peak_freqs, peak_mags)
     
-    # Get peak data
+    # Peak data (still computed for export, but not drawn in plot)
     top_peaks = config.get('fft_top_peaks', 10)
     if len(peaks_df) > 0:
         peak_freqs = peaks_df['Frequency (cycles/hour)'].values[:top_peaks]
@@ -649,13 +649,30 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
     shade_transition = parse_shade_transition_config(config)
     treatment_events = parse_treatment_events_config(config)
     
+    # Compute Gaussian-smoothed ratio and ALS baseline for overlay (match FFT preprocessing)
+    processing_cfg = config.get('processing', {}) or config.get('sections', {}).get('processing', {})
+    sigma_gaussian = processing_cfg.get('sigma_gaussian', config.get('sigma_gaussian', 50))
+    lam_als = processing_cfg.get('lam_als', config.get('lam_als', 100000000))
+    p_als = processing_cfg.get('p_als', config.get('p_als', 0.000100))
+    niter_als = processing_cfg.get('niter_als', config.get('niter_als', 20))
+    
+    signal_gaussian = apply_gaussian_smoothing(signal_valid, sigma=sigma_gaussian)
+    als_baseline = apply_als_baseline(signal_gaussian, lam=lam_als, p=p_als, niter=niter_als)
+    
     # Create combined plot: timeseries on top, FFT below
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=False, gridspec_kw={'hspace': 0.35})
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=False, gridspec_kw={'hspace': 0.35})
     
     # Top subplot: Timeseries of ratio
     if pd.api.types.is_datetime64_any_dtype(results_df.index):
         datetimes_valid = results_df.index[mask]
+        # Raw ratio
         ax1.plot(datetimes_valid, signal_valid, color='#2E86AB', alpha=0.8, linewidth=2, label=ratio_name)
+        # Gaussian-smoothed ratio (used for FFT)
+        ax1.plot(datetimes_valid, signal_gaussian, color='black', linestyle='--',
+                 linewidth=1.5, alpha=0.7, label=f'Gaussian (σ={sigma_gaussian})')
+        # ALS baseline
+        ax1.plot(datetimes_valid, als_baseline, color='red', linestyle=':',
+                 linewidth=1.5, alpha=0.7, label=f'ALS baseline (λ={lam_als:.0e}, p={p_als:.4f})')
         
         # Add day/night shading
         add_day_night_shading(ax1, datetimes_valid.min(), datetimes_valid.max(), 
@@ -692,6 +709,10 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
         # Fallback for non-datetime index
         time_hours_valid = np.arange(len(signal_valid))
         ax1.plot(time_hours_valid, signal_valid, color='#2E86AB', alpha=0.8, linewidth=2, label=ratio_name)
+        ax1.plot(time_hours_valid, signal_gaussian, color='black', linestyle='--',
+                 linewidth=1.5, alpha=0.7, label=f'Gaussian (σ={sigma_gaussian})')
+        ax1.plot(time_hours_valid, als_baseline, color='red', linestyle=':',
+                 linewidth=1.5, alpha=0.7, label=f'ALS baseline (λ={lam_als:.0e}, p={p_als:.4f})')
         ax1.set_xlabel('Time (hours from start)', fontsize=13, fontweight='bold')
     
     ax1.set_ylabel(ratio_name, fontsize=13, fontweight='bold')
@@ -704,11 +725,6 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
     
     # Bottom subplot: FFT Spectrum
     ax2.plot(positive_freqs, magnitude, color='#1E88E5', linewidth=2, label='FFT Magnitude', zorder=1)
-    
-    if len(peak_freqs) > 0:
-        ax2.scatter(peak_freqs, peak_magnitudes, color='#D32F2F', s=150, zorder=5, 
-                   label=f'Top {len(peak_freqs)} Peaks', marker='o', edgecolors='darkred', 
-                   linewidths=2, alpha=0.9)
     
     # Highlight diurnal range (0.03-0.05 cycles/hour, ~20-33 hour period)
     ax2.axvspan(0.03, 0.05, alpha=0.2, color='gold', label='Diurnal Range (20-33h)', zorder=0)
@@ -740,7 +756,7 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
     plt.close()
 
 
-def plot_processing_stages(df_original, df_after_spikes, df_corrected, output_dir, config):
+def plot_processing_stages(df_original, df_after_spikes, df_corrected, output_dir, config, jump_info_dict=None):
     """
     Plot overlaid time-series showing processing stages:
     - Raw data
@@ -814,6 +830,40 @@ def plot_processing_stages(df_original, df_after_spikes, df_corrected, output_di
 
         # Plot baseline-corrected
         ax.plot(x_values, y_baseline_corrected, color='red', linewidth=1.8, alpha=0.9, label='Baseline Corrected')
+
+        # Mark jump points on baseline-corrected data if available
+        if jump_info_dict and col in jump_info_dict:
+            jump_data = jump_info_dict[col]
+            jump_indices = jump_data.get('jump_indices', [])
+            if len(jump_indices) > 0:
+                # Convert to numpy array if needed
+                if not isinstance(jump_indices, np.ndarray):
+                    jump_indices = np.array(jump_indices)
+
+                # Filter indices to valid range
+                valid_jump_indices = jump_indices[(jump_indices >= 0) & (jump_indices < len(x_values))]
+
+                if len(valid_jump_indices) > 0:
+                    # Map indices to x-axis values
+                    if isinstance(x_values, pd.DatetimeIndex):
+                        jump_x_values = x_values[valid_jump_indices]
+                    else:
+                        jump_x_values = x_values[valid_jump_indices]
+
+                    # Get y-values from baseline-corrected curve
+                    jump_y_values = y_baseline_corrected[valid_jump_indices]
+
+                    ax.scatter(
+                        jump_x_values,
+                        jump_y_values,
+                        edgecolors='orange',
+                        facecolors='none',
+                        marker='o',
+                        s=100,
+                        linewidths=2,
+                        zorder=5,
+                        label=f'Jump Points (n={len(valid_jump_indices)})'
+                    )
 
         # Add day/night shading if datetime index
         if pd.api.types.is_datetime64_any_dtype(df_original.index):

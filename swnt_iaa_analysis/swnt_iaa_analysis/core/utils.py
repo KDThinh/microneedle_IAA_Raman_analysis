@@ -438,7 +438,8 @@ def correct_baseline_shifts(signal, threshold_multiplier=5, window_size=5,
         
         # Apply correction to the target signal
         # (We subtract the jump to bring the new baseline down/up to the old one)
-        # This is applied cumulatively: each correction affects all subsequent points
+        # First apply a hard step correction starting at the adjusted jump index `idx`.
+        # This makes the baseline continuous in an average sense.
         y_corrected[idx:] -= step_change
         
         # #region agent log
@@ -463,6 +464,24 @@ def correct_baseline_shifts(signal, threshold_multiplier=5, window_size=5,
     with open(_log_path, 'a') as f:
         f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H1", "location": f"{__file__}:445", "message": "correct_baseline_shifts: returning corrected signal", "data": {"num_jumps": len(clean_indices), "max_diff_target_vs_corrected": float(_max_diff), "are_identical": bool(_are_identical), "y_corrected_sample": y_corrected[:5].tolist() if len(y_corrected) >= 5 else y_corrected.tolist(), "target_sample": target_signal[:5].tolist() if len(target_signal) >= 5 else target_signal.tolist()}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
     # #endregion
+    
+    # Optional: local Gaussian smoothing around each jump to reduce residual kinks
+    try:
+        from scipy.ndimage import gaussian_filter1d
+        if len(clean_indices) > 0 and window_size > 0:
+            n = len(y_corrected)
+            half_width = max(1, window_size)
+            sigma_local = max(1.0, window_size / 3.0)
+            for idx in clean_indices:
+                start_s = max(0, idx - half_width)
+                end_s = min(n, idx + half_width + 1)
+                segment = y_corrected[start_s:end_s]
+                if len(segment) >= 3:
+                    smoothed_seg = gaussian_filter1d(segment, sigma=sigma_local, mode='nearest')
+                    y_corrected[start_s:end_s] = smoothed_seg
+    except Exception:
+        # If scipy is unavailable or smoothing fails, fall back to unsmoothed result
+        pass
     
     return y_corrected, np.array(clean_indices), jump_info, smoothed_signal
 
@@ -574,6 +593,24 @@ def apply_corrections_at_jump_indices(signal, jump_indices_valid, window_size=5,
             'cumulative_offset': float(cumulative_offset),
             'jump_type': 'shared'  # Indicates this jump was shared from another signal
         })
+    
+    # Optional: local Gaussian smoothing around each jump to reduce residual kinks
+    try:
+        from scipy.ndimage import gaussian_filter1d
+        if len(jump_indices_valid) > 0 and window_size > 0:
+            n = len(y_corrected)
+            half_width = max(1, window_size)
+            sigma_local = max(1.0, window_size / 3.0)
+            for idx in jump_indices_valid:
+                start_s = max(0, idx - half_width)
+                end_s = min(n, idx + half_width + 1)
+                segment = y_corrected[start_s:end_s]
+                if len(segment) >= 3:
+                    smoothed_seg = gaussian_filter1d(segment, sigma=sigma_local, mode='nearest')
+                    y_corrected[start_s:end_s] = smoothed_seg
+    except Exception:
+        # If scipy is unavailable or smoothing fails, fall back to unsmoothed result
+        pass
     
     return y_corrected, jump_info, smoothed_signal
 

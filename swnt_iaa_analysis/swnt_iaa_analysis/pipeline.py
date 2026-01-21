@@ -20,7 +20,7 @@ from .analysis.ratios import calculate_ratios
 from .analysis.fourier import compute_fourier_transform, compute_diurnal_average
 from .io.config import load_profile_config
 from .io.exporter import export_results, export_fft_results, load_processed_data
-from .visualization.plotting import plot_ratio_timeseries, plot_signal_correction_comparison, plot_representative_raman_spectrum, plot_fft_analysis, plot_spike_removal_comparison, plot_processing_stages
+from .visualization.plotting import plot_ratio_timeseries, plot_representative_raman_spectrum, plot_fft_analysis, plot_processing_stages
 
 logger = logging.getLogger(__name__)
 
@@ -145,16 +145,10 @@ class RamanPipeline:
             # Store original data for comparison plots (original columns are preserved, corrected ones created with _BaselineCorrected suffix)
             results_original = self.results.copy()
             self.results, jump_info_dict, spike_info_dict, results_after_spikes = self._apply_signal_corrections(self.results)
-            # Plot before/after comparison
-            print("Generating spike removal comparison plots...")
-            logger.info("Generating spike removal comparison plots...")
-            plot_spike_removal_comparison(results_original, results_after_spikes, self.output_dir, self.config, spike_info_dict)
-            print("Generating signal correction comparison plots...")
-            logger.info("Generating signal correction comparison plots...")
-            plot_signal_correction_comparison(results_original, self.results, self.output_dir, self.config, jump_info_dict)
+            # Plot processing stages (includes jump markers)
             print("Generating processing stages plots...")
             logger.info("Generating processing stages plots...")
-            plot_processing_stages(results_original, results_after_spikes, self.results, self.output_dir, self.config)
+            plot_processing_stages(results_original, results_after_spikes, self.results, self.output_dir, self.config, jump_info_dict)
         
         # 3. Calculate ratios
         print("Calculating ratios...")
@@ -837,21 +831,10 @@ class RamanPipeline:
             self.results, jump_info_dict, spike_info_dict, results_after_spikes = self._apply_signal_corrections(self.results)
             
             if results_original is not None:
-                # Generate spike removal comparison plot if spike removal was performed
-                if 'spike_removal' in steps and spike_info_dict:
-                    print("Generating spike removal comparison plots...")
-                    logger.info("Generating spike removal comparison plots...")
-                    plot_spike_removal_comparison(results_original, results_after_spikes, self.output_dir, self.config, spike_info_dict)
-                
-                # Generate signal correction comparison plot (includes baseline correction)
-                if 'baseline_correction' in steps:
-                    print("Generating signal correction comparison plots...")
-                    logger.info("Generating signal correction comparison plots...")
-                    plot_signal_correction_comparison(results_original, self.results, self.output_dir, self.config, jump_info_dict)
-                # Always generate processing stages plot when we have spike & baseline info
+                # Generate processing stages plot (includes jump markers)
                 print("Generating processing stages plots...")
                 logger.info("Generating processing stages plots...")
-                plot_processing_stages(results_original, results_after_spikes, self.results, self.output_dir, self.config)
+                plot_processing_stages(results_original, results_after_spikes, self.results, self.output_dir, self.config, jump_info_dict)
         
         if 'ratios' in steps:
             print("Calculating ratios...")
