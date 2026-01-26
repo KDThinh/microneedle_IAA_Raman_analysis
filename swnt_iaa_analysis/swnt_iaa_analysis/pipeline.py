@@ -215,16 +215,23 @@ class RamanPipeline:
         wavenumber_filter = wavenumbers_full >= 250
         wavenumbers = wavenumbers_full[wavenumber_filter]
         
-        # Get skip_scans parameter from config (default: 500)
-        skip_scans = processing_cfg.get('skip_scans', 500)
+        # Get skip_scans parameters from config
+        # Check nested processing section first, then flattened top level, then use defaults
+        skip_scans_bef = processing_cfg.get('skip_scans_bef', config.get('skip_scans_bef', 500))
+        skip_scans_end = processing_cfg.get('skip_scans_end', config.get('skip_scans_end', 0))
         
         summaries = []
         scan_numbers = sorted(raman_df['Scan Number'].unique())
         
         # Skip first N scans
-        if skip_scans > 0 and len(scan_numbers) > skip_scans:
-            scan_numbers = scan_numbers[skip_scans:]
-            logger.info(f"Skipped first {skip_scans} scans. Processing {len(scan_numbers)} scans.")
+        if skip_scans_bef > 0 and len(scan_numbers) > skip_scans_bef:
+            scan_numbers = scan_numbers[skip_scans_bef:]
+            logger.info(f"Skipped first {skip_scans_bef} scans. Processing {len(scan_numbers)} scans.")
+        
+        # Skip last N scans
+        if skip_scans_end > 0 and len(scan_numbers) > skip_scans_end:
+            scan_numbers = scan_numbers[:-skip_scans_end]
+            logger.info(f"Skipped last {skip_scans_end} scans. Processing {len(scan_numbers)} scans.")
         
         # Track if we've stored representative spectrum data
         representative_stored = False

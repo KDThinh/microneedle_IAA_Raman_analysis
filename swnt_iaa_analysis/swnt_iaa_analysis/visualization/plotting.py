@@ -669,10 +669,10 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
         ax1.plot(datetimes_valid, signal_valid, color='#2E86AB', alpha=0.8, linewidth=2, label=ratio_name)
         # Gaussian-smoothed ratio (used for FFT)
         ax1.plot(datetimes_valid, signal_gaussian, color='black', linestyle='--',
-                 linewidth=1.5, alpha=0.7, label=f'Gaussian (σ={sigma_gaussian})')
+                 linewidth=1.5, alpha=0.7, label='Gaussian')
         # ALS baseline
         ax1.plot(datetimes_valid, als_baseline, color='red', linestyle=':',
-                 linewidth=1.5, alpha=0.7, label=f'ALS baseline (λ={lam_als:.0e}, p={p_als:.4f})')
+                 linewidth=1.5, alpha=0.7, label='')
         
         # Add day/night shading
         add_day_night_shading(ax1, datetimes_valid.min(), datetimes_valid.max(), 
@@ -710,9 +710,9 @@ def plot_fft_analysis(results_df, fft_results, output_dir, config, ratio_name='F
         time_hours_valid = np.arange(len(signal_valid))
         ax1.plot(time_hours_valid, signal_valid, color='#2E86AB', alpha=0.8, linewidth=2, label=ratio_name)
         ax1.plot(time_hours_valid, signal_gaussian, color='black', linestyle='--',
-                 linewidth=1.5, alpha=0.7, label=f'Gaussian (σ={sigma_gaussian})')
+                 linewidth=1.5, alpha=0.7, label='Gaussian')
         ax1.plot(time_hours_valid, als_baseline, color='red', linestyle=':',
-                 linewidth=1.5, alpha=0.7, label=f'ALS baseline (λ={lam_als:.0e}, p={p_als:.4f})')
+                 linewidth=1.5, alpha=0.7, label='')
         ax1.set_xlabel('Time (hours from start)', fontsize=13, fontweight='bold')
     
     ax1.set_ylabel(ratio_name, fontsize=13, fontweight='bold')
@@ -825,13 +825,10 @@ def plot_processing_stages(df_original, df_after_spikes, df_corrected, output_di
         label_smooth = 'Gaussian' if ts_method == 'gaussian' else 'Savitzky-Golay'
         ax.plot(x_values, y_smooth, color='#1f77b4', linewidth=1.5, alpha=0.7, label=label_smooth)
 
-        # Plot spike-removed
-        ax.plot(x_values, y_spikes_removed, color='green', linewidth=1.5, alpha=0.8, label='Hampel (Spikes Removed)')
-
         # Plot baseline-corrected
         ax.plot(x_values, y_baseline_corrected, color='red', linewidth=1.8, alpha=0.9, label='Baseline Corrected')
 
-        # Mark jump points on baseline-corrected data if available
+        # Mark jump points on Gaussian smoothed curve if available
         if jump_info_dict and col in jump_info_dict:
             jump_data = jump_info_dict[col]
             jump_indices = jump_data.get('jump_indices', [])
@@ -850,8 +847,8 @@ def plot_processing_stages(df_original, df_after_spikes, df_corrected, output_di
                     else:
                         jump_x_values = x_values[valid_jump_indices]
 
-                    # Get y-values from baseline-corrected curve
-                    jump_y_values = y_baseline_corrected[valid_jump_indices]
+                    # Get y-values from Gaussian smoothed curve
+                    jump_y_values = y_smooth[valid_jump_indices]
 
                     ax.scatter(
                         jump_x_values,
@@ -862,7 +859,7 @@ def plot_processing_stages(df_original, df_after_spikes, df_corrected, output_di
                         s=100,
                         linewidths=2,
                         zorder=5,
-                        label=f'Jump Points (n={len(valid_jump_indices)})'
+                        label=''
                     )
 
         # Add day/night shading if datetime index
