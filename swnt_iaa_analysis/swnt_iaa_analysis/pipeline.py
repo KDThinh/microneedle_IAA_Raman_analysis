@@ -424,24 +424,12 @@ class RamanPipeline:
             if np.sum(mask_ref) >= 3:
                 # Extract valid signal
                 signal_valid_ref = signal_ref[mask_ref]
-                # Apply chosen smoothing for spike detection
-                if timeseries_smoothing_method == 'gaussian':
-                    signal_valid_ref_sg = apply_gaussian_smoothing(
-                        signal_valid_ref,
-                        sigma=timeseries_gaussian_sigma,
-                    )
-                else:
-                    signal_valid_ref_sg = smooth_signal(
-                        signal_valid_ref,
-                        window_size=timeseries_sg_window,
-                        poly_order=timeseries_sg_poly_order,
-                    )
                 valid_indices_ref = np.where(mask_ref)[0]
                 
-                # Remove spikes from reference
+                # Step 1: Remove spikes from the original valid signal (Hampel-first flow)
                 logger.info(f"Removing spikes from {reference_column}...")
                 cleaned_signal_ref, spike_mask_ref = remove_spikes_hampel(
-                    signal_valid_ref_sg,
+                    signal_valid_ref,
                     window_size=spike_window,
                     threshold=spike_threshold,
                     min_spike_length=spike_min_length,
@@ -450,11 +438,24 @@ class RamanPipeline:
                 n_spikes_ref = np.sum(spike_mask_ref)
                 if n_spikes_ref > 0:
                     logger.info(f"  Removed {n_spikes_ref} spike(s) from {reference_column}")
+
+                # Step 2: Smooth after spike removal
+                if timeseries_smoothing_method == 'gaussian':
+                    smoothed_after_spikes_ref = apply_gaussian_smoothing(
+                        cleaned_signal_ref,
+                        sigma=timeseries_gaussian_sigma,
+                    )
+                else:
+                    smoothed_after_spikes_ref = smooth_signal(
+                        cleaned_signal_ref,
+                        window_size=timeseries_sg_window,
+                        poly_order=timeseries_sg_poly_order,
+                    )
                 
-                # Detect jumps on reference signal
+                # Step 3: Detect jumps on smoothed, spike-removed reference signal
                 logger.info(f"Detecting baseline jumps in {reference_column}...")
                 corrected_signal_ref, jump_indices_valid_ref, jump_info_ref, smoothed_signal_ref = correct_baseline_shifts(
-                    cleaned_signal_ref,
+                    smoothed_after_spikes_ref,
                     threshold_multiplier=baseline_threshold_multiplier,
                     window_size=baseline_window_size,
                     smooth_first=baseline_smooth_first,
@@ -514,24 +515,12 @@ class RamanPipeline:
             
             # Extract valid signal
             signal_valid = signal[mask]
-            # Apply chosen smoothing for spike detection
-            if timeseries_smoothing_method == 'gaussian':
-                signal_valid_sg = apply_gaussian_smoothing(
-                    signal_valid,
-                    sigma=timeseries_gaussian_sigma,
-                )
-            else:
-                signal_valid_sg = smooth_signal(
-                    signal_valid,
-                    window_size=timeseries_sg_window,
-                    poly_order=timeseries_sg_poly_order,
-                )
             valid_indices = np.where(mask)[0]
             
-            # Step 1: Remove spikes
+            # Step 1: Remove spikes from the original valid signal (Hampel-first flow)
             logger.info(f"Removing spikes from {col}...")
             cleaned_signal, spike_mask = remove_spikes_hampel(
-                signal_valid_sg,
+                signal_valid,
                 window_size=spike_window,
                 threshold=spike_threshold,
                 min_spike_length=spike_min_length,
@@ -552,12 +541,25 @@ class RamanPipeline:
             cleaned_full[mask] = cleaned_signal
             df_after_spikes[col] = cleaned_full
             
-            # Step 2: Correct baseline shifts
+            # Step 2: Smooth after spike removal
+            if timeseries_smoothing_method == 'gaussian':
+                smoothed_after_spikes = apply_gaussian_smoothing(
+                    cleaned_signal,
+                    sigma=timeseries_gaussian_sigma,
+                )
+            else:
+                smoothed_after_spikes = smooth_signal(
+                    cleaned_signal,
+                    window_size=timeseries_sg_window,
+                    poly_order=timeseries_sg_poly_order,
+                )
+
+            # Step 3: Correct baseline shifts
             if col == reference_column:
                 # For reference column, use full detection
                 logger.info(f"Detecting baseline jumps in {col}...")
                 corrected_signal, jump_indices, jump_info, smoothed_signal = correct_baseline_shifts(
-                    cleaned_signal,
+                    smoothed_after_spikes,
                     threshold_multiplier=baseline_threshold_multiplier,
                     window_size=baseline_window_size,
                     smooth_first=baseline_smooth_first,
@@ -591,7 +593,7 @@ class RamanPipeline:
                 
                 # Apply corrections at these jump indices
                 corrected_signal, jump_info, smoothed_signal = apply_corrections_at_jump_indices(
-                    cleaned_signal,
+                    smoothed_after_spikes,
                     jump_indices_valid_this_col,
                     window_size=baseline_window_size,
                     smooth_first=baseline_smooth_first,

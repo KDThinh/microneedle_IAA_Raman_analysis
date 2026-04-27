@@ -29,7 +29,7 @@ profiles:
       # Time-series Processing (applied in order: smoothing → spike removal → baseline correction)
       # ========================================================================
       # Time-series Smoothing (before spike removal)
-      timeseries_smoothing_method: gaussian  # 'savitzky' or 'gaussian'
+      timeseries_smoothing_method: savitzky  # 'savitzky' or 'gaussian'
       timeseries_sg_window: 15       # Window size for Savitzky-Golay smoothing of time-series (must be odd)
       timeseries_sg_poly_order: 2   # Polynomial order for Savitzky-Golay smoothing of time-series
       timeseries_gaussian_sigma: 5  # Sigma for Gaussian smoothing if method='gaussian'
@@ -109,11 +109,69 @@ profiles:
     outputs:
       timeseries_x_axis: scan_number  # Options: 'datetime' or 'scan_number'. Default: datetime 
 
-  # ============================================================================
-  # IN PLANTA PROFILES - For plant-based experiments
-  # Data location: IAA Nanosensor Experiment/In planta/
-  # ============================================================================
-  # Exa Bok Choy Control Run 1
+# ============================================================================
+# MELATONIN FEEDING PROFILES - For plant-based experiments
+# Data location: IAA Nanosensor Experiment\Melatonin injection flower
+# ============================================================================
+
+  melatonin_feeding_run1:
+    description: Melatonin-infused microneedle is injected into a flower stem, done at DiSTAP.
+    inherits: processing_default
+    data_source:
+      raman_relative_path: \IAA Nanosensor Experiment\Melatonin injection flower\Run 1\Time Lapse_IAA sensor MT Mn_300s_10000scans.txt
+    metadata:
+      experiment: melatonin feeding
+      plant_type: Rose
+      treatment: Melatonin Feeding
+      replicate_number: 1
+    processing:
+      skip_scans_bef: 100  # Number of scans to skip from the beginning (default: 500)
+      recorded_excitation_nm: 840  # The laser the file metadata implies (raw text files usually come from a device set to 785nm)
+      spike_threshold: 1000000000  # effectively disables Hampel spike removal
+    outputs:
+      timeseries_x_axis: scan_number  # Options: 'datetime' or 'scan_number'. Default: datetime 
+
+  melatonin_feeding_run2:
+    description: Melatonin-infused microneedle is injected into a flower stem, done at DiSTAP.
+    inherits: processing_default
+    data_source:
+      raman_relative_path: \IAA Nanosensor Experiment\Melatonin injection flower\Run 2\Time Lapse_IAA sensor_add MT aft 24h_300s_10000scans.txt
+    metadata:
+      experiment: melatonin feeding
+      plant_type: Rose
+      treatment: Melatonin Feeding
+      replicate_number: 2
+    processing:
+      skip_scans_bef: 100  # Number of scans to skip from the beginning (default: 500)
+      recorded_excitation_nm: 830  # The laser the file metadata implies (raw text files usually come from a device set to 785nm)
+      spike_threshold: 1000000000  # effectively disables Hampel spike removal
+    outputs:
+      timeseries_x_axis: scan_number  # Options: 'datetime' or 'scan_number'. Default: datetime 
+
+  melatonin_feeding_run3:
+    description: Melatonin-infused microneedle is injected into a flower stem, done at DiSTAP.
+    inherits: processing_default
+    data_source:
+      raman_relative_path: \IAA Nanosensor Experiment\Melatonin injection flower\Run 3\Time Lapse_IAA sensor_add MT aft 24h_300s_10000scans.txt
+    metadata:
+      experiment: melatonin feeding
+      plant_type: Rose
+      treatment: Melatonin Feeding
+      replicate_number: 3
+    processing:
+      skip_scans_bef: 100  # Number of scans to skip from the beginning (default: 500)
+      recorded_excitation_nm: 830  # The laser the file metadata implies (raw text files usually come from a device set to 785nm)
+      spike_threshold: 10  # effectively disables Hampel spike removal
+    outputs:
+      timeseries_x_axis: scan_number  # Options: 'datetime' or 'scan_number'. Default: datetime 
+
+
+
+# ============================================================================
+# IN PLANTA PROFILES - For plant-based experiments
+# Data location: IAA Nanosensor Experiment/In planta/
+# ============================================================================
+# Exa Bok Choy Control Run 1
   bokchoy_control_6to22_Temp_Hum_Variable_Run1:
     description: Bok Choy Control treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable - uncontrolled but recorded), Run 1, done at DiSTAP
     inherits: processing_default
@@ -361,7 +419,6 @@ profiles:
     outputs:
       timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
 
-
   Nb_Drought_6to22_Temp_Hum_Variable_Run1:
     description: Nb Drought treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable - uncontrolled but recorded), Run 1, done at DiSTAP. Drought stress observed on May 31, 2025, 3:00 PM.
     inherits: processing_default
@@ -418,7 +475,6 @@ profiles:
     outputs:
       timeseries_x_axis: datetime  # Options: 'datetime' or 'scan_number'. Default: datetime
     # Treatment events: only stress observations
-
 
   Nb_Control_8to24_Temp_Hum_Const_Run1:
     description: Nb Control treatment, 8to24 light cycle, constant temp/humidity (Temp_Hum_Control - controlled and recorded), Run 1, done at TLL
@@ -971,3 +1027,16 @@ profiles:
       raman_relative_path: IAA Nanosensor Experiment/In vitro/Solution phase/Calibration/run 2/run 2_1.txt
     outputs:
       timeseries_x_axis: scan_number  # Use scan number instead of datetime for x-axis
+
+# ============================================================================
+# IN VITRO PROFILES - For cuvette/in vitro experiments
+# Data location: IAA-SILK-FILM/p830/ or IAA Nanosensor Experiment/In vitro/
+# ============================================================================
+
+  in_vitro_default:
+    description: Default in vitro cuvette measurement without Google Drive dependency.
+    inherits: processing_default
+    data_source:
+      raman_relative_path: G:/My Drive/Work/DiSTAP/Research/Auxin IAA/IAA-MN longitudinal/IAA-SILK-FILM/p830/In vitro longitudinal/run 1.txt
+    metadata:
+      experiment: in vitro
