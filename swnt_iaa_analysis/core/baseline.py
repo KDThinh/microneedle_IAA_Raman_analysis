@@ -60,9 +60,10 @@ def apply_als_baseline(y, lam=1e7, p=0.001, niter=20):
     baseline : array
         Fitted baseline
     """
+    y = np.asarray(y, dtype=float)
     L = len(y)
-    D = diags([1, -2, 1], [0, -1, -2], shape=(L, L - 2), format='csc')
-    w = np.ones(L)
+    D = diags([1.0, -2.0, 1.0], [0, -1, -2], shape=(L, L - 2), dtype=float, format='csc')
+    w = np.ones(L, dtype=float)
     for i in range(niter):
         W = diags(w, 0, shape=(L, L), format='csc')
         Z = W + lam * D.dot(D.transpose())

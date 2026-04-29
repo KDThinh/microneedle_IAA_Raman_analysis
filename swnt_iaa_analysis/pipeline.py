@@ -1,6 +1,7 @@
 """High-level pipeline for SWNT IAA Raman analysis."""
 
 import os
+import copy
 import logging
 import time
 from datetime import datetime
@@ -10,6 +11,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from .core.loader import load_raman_dataset, load_temperature_data
 from .core.preprocessing import apply_savgol_filter
@@ -120,7 +122,10 @@ class RamanPipeline:
                 self.output_dir = Path(output_dir)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Output directory: {self.output_dir}")
-        
+
+        # Persist resolved config + run metadata for reproducibility
+        self._write_run_log(mode='analyze')
+
         # 1b. Load Temperature data (optional)
         logger.info("Loading temperature data...")
         self.temp_dataset = load_temperature_data(self.config)
@@ -826,7 +831,14 @@ class RamanPipeline:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Output directory: {self.output_dir}")
-        
+
+        # Persist resolved config + run metadata for reproducibility
+        self._write_run_log(
+            mode='reprocess',
+            source_path=str(csv_path),
+            extra={'reprocess_steps': ",".join(steps)},
+        )
+
         # Store original for comparison plots
         results_original = self.results.copy() if ('spike_removal' in steps or 'baseline_correction' in steps) else None
         
@@ -883,6 +895,126 @@ class RamanPipeline:
         
         return self.results
     
+    def _write_run_log(
+        self,
+        mode: str = 'analyze',
+        source_path: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Persist the resolved/effective configuration plus run metadata for traceability.
+
+        Writes two files into ``self.output_dir``:
+        - ``effective_config.yaml``: full resolved profile (post-inheritance) plus a
+          ``_run_metadata`` block with timestamp, profile, algorithm, source data path.
+        - ``run_summary.txt``: short human-readable summary of key parameters.
+
+        Also prints the summary to the console so users see what params drove the run.
+        """
+        if self.output_dir is None:
+            return
+
+        sections = self.config.get('sections') or {}
+        if sections:
+            effective_cfg = copy.deepcopy(sections)
+        else:
+            effective_cfg = {
+                k: copy.deepcopy(v)
+                for k, v in self.config.items()
+                if k != 'sections'
+            }
+
+        if source_path is None and self.dataset is not None:
+            source_path = self.dataset.source_path
+
+        try:
+            from importlib.metadata import version, PackageNotFoundError
+            try:
+                pkg_version = version("swnt_iaa_analysis")
+            except PackageNotFoundError:
+                pkg_version = "unknown"
+        except Exception:
+            pkg_version = "unknown"
+
+        run_metadata: Dict[str, Any] = {
+            'timestamp': datetime.now().isoformat(timespec='seconds'),
+            'mode': mode,
+            'profile_name': self.profile_name,
+            'algorithm': self.algorithm,
+            'package_version': pkg_version,
+            'output_dir': str(self.output_dir),
+            'source_data_path': source_path,
+        }
+        if extra:
+            run_metadata.update(extra)
+
+        out_doc: Dict[str, Any] = {'_run_metadata': run_metadata}
+        out_doc.update(effective_cfg)
+
+        cfg_path = self.output_dir / 'effective_config.yaml'
+        try:
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                yaml.safe_dump(
+                    out_doc,
+                    f,
+                    sort_keys=False,
+                    default_flow_style=False,
+                    allow_unicode=True,
+                )
+        except Exception as exc:
+            logger.warning(f"Failed to write effective_config.yaml: {exc}")
+
+        proc = effective_cfg.get('processing', {}) if isinstance(effective_cfg, dict) else {}
+        smooth_method = proc.get('timeseries_smoothing_method', 'savitzky')
+        if smooth_method == 'gaussian':
+            smooth_str = (
+                f"gaussian (sigma={proc.get('timeseries_gaussian_sigma', 'default')})"
+            )
+        else:
+            smooth_str = (
+                f"savitzky (window={proc.get('timeseries_sg_window', 'default')}, "
+                f"poly={proc.get('timeseries_sg_poly_order', 'default')})"
+            )
+
+        summary_lines = [
+            "=" * 64,
+            f"Run timestamp:    {run_metadata['timestamp']}",
+            f"Mode:             {mode}",
+            f"Profile:          {self.profile_name}",
+            f"Algorithm:        {self.algorithm}",
+            f"Package version:  {pkg_version}",
+            f"Output dir:       {self.output_dir}",
+            f"Source data:      {source_path}",
+            "",
+            "--- Processing parameters ---",
+            f"Time-series smoothing: {smooth_str}",
+            f"Spike removal:    window={proc.get('spike_window')}, "
+            f"threshold={proc.get('spike_threshold')}",
+            f"Baseline jump:    threshold={proc.get('baseline_correction_threshold')}, "
+            f"window={proc.get('baseline_correction_window')}, "
+            f"cumulative={proc.get('baseline_detect_cumulative_jumps', True)} "
+            f"(cum_window={proc.get('baseline_cumulative_window', 5)})",
+            f"FFT:              gaussian_sigma={proc.get('fft_gaussian_sigma')}, "
+            f"als_p={proc.get('fft_als_p')}, "
+            f"top_peaks={proc.get('fft_top_peaks')}",
+        ]
+        if extra:
+            summary_lines.append("")
+            summary_lines.append("--- Extra ---")
+            for k, v in extra.items():
+                summary_lines.append(f"{k}: {v}")
+        summary_lines.append("=" * 64)
+        summary = "\n".join(summary_lines)
+
+        txt_path = self.output_dir / 'run_summary.txt'
+        try:
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(summary + "\n")
+        except Exception as exc:
+            logger.warning(f"Failed to write run_summary.txt: {exc}")
+
+        print(summary)
+
     def _export_results(self):
         """Export results to files."""
         if self.results is not None:

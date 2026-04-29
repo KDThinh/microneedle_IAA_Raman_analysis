@@ -8,29 +8,40 @@ profiles:
     data_source:
       requires_google_drive: false
     processing:
+      # Spectral preprocessing (per-scan Raman spectrum)
       excitation_nm: 830
       recorded_excitation_nm: 830
       spectral_sg_window: 25
       spectral_sg_poly_order: 2
       spectral_lieberfit_poly_order: 7
       spectral_lieberfit_iterations: 50
-      timeseries_smoothing_method: savitzky
-      timeseries_sg_window: 15
+
+      # Time-series smoothing (applied after spectral extraction)
+      timeseries_smoothing_method: savitzky #or gaussian
+      timeseries_sg_window: 5
       timeseries_sg_poly_order: 2
       timeseries_gaussian_sigma: 5
+
+      # Spike removal (Hampel filter settings)
       spike_window: 3
       spike_threshold: 3.0
       spike_min_length: 1
       spike_max_length: 20
+
+      # Baseline jump detection and correction
       baseline_correction_threshold: 5
-      baseline_correction_window: 80
+      baseline_correction_window: 15
       baseline_detect_cumulative_jumps: true
       baseline_cumulative_window: 5
+
+      # FFT preprocessing and peak reporting
       fft_gaussian_sigma: 50
       fft_als_lambda: 100000000
       fft_als_p: 0.0001
       fft_als_iterations: 20
       fft_top_peaks: 10
+
+      # Scan trimming
       skip_scans_before: 500
       skip_scans_after: 0
 
@@ -285,31 +296,6 @@ profiles:
       fft_als_p: 0.01
     outputs:
       timeseries_x_axis: datetime
-  Nb_Control_6to22_Temp_Hum_Variable_Run3:
-    description: Nb Control treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable
-      - uncontrolled but recorded), Run 3, done at DiSTAP
-    inherits: processing_default
-    data_source:
-      raman_relative_path: IAA Nanosensor Experiment/In planta/Nb/Treatment_Control/Light_6to22/Temp_Hum_Variable/Run
-        3/Raw data/run 9/run 9.txt
-      temp_relative_path: DiSTAP/Research/Auxin IAA/IAA-MN longitudinal/IAA Nanosensor
-        Experiment/In planta/Temperature and humidity/Indoor_thermometer.csv
-    metadata:
-      experiment: in planta
-      plant_type: Nb
-      treatment: Control
-      temp_hum_control: false
-      light_cycle: 6to22
-      replicate_number: 3
-    processing:
-      timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
-      baseline_correction_window: 50
-      fft_gaussian_sigma: 30
-      fft_als_p: 0.01
-    outputs:
-      timeseries_x_axis: datetime
   Nb_Drought_6to22_Temp_Hum_Variable_Run1:
     description: Nb Drought treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable
       - uncontrolled but recorded), Run 1, done at DiSTAP. Drought stress observed
@@ -317,7 +303,7 @@ profiles:
     inherits: processing_default
     data_source:
       raman_relative_path: IAA Nanosensor Experiment/In planta/Nb/Treatment_Drought/Light_6to22/Temp_Hum_Variable/Run
-        1/Raw data/combined_raman_data/run 8_1.txt
+        1/Raw data/run 8_1.txt
       temp_relative_path: DiSTAP/Research/Auxin IAA/IAA-MN longitudinal/IAA Nanosensor
         Experiment/In planta/Temperature and humidity/Indoor_thermometer.csv
     metadata:
@@ -336,11 +322,40 @@ profiles:
     outputs:
       timeseries_x_axis: datetime
     processing:
+      timeseries_smoothing_method: savitzky #or gaussian
+      timeseries_sg_window: 5
+      timeseries_sg_poly_order: 2
+      spike_window: 5
+      spike_threshold: 10.0
+      baseline_correction_threshold: 5
+      baseline_correction_window: 10
+      fft_gaussian_sigma: 30
+      fft_als_p: 0.01
+  Nb_Drought_6to22_Temp_Hum_Variable_Run2:
+    description: Nb Drought treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable
+      - uncontrolled but recorded), Run 2, done at DiSTAP
+    inherits: processing_default
+    data_source:
+      raman_relative_path: IAA Nanosensor Experiment/In planta/Nb/Treatment_Drought/Light_6to22/Temp_Hum_Variable/Run
+        2/Raw data/run 9/run 9.txt
+      temp_relative_path: DiSTAP/Research/Auxin IAA/IAA-MN longitudinal/IAA Nanosensor
+        Experiment/In planta/Temperature and humidity/Indoor_thermometer.csv
+    metadata:
+      experiment: in planta
+      plant_type: Nb
+      treatment: Drought
+      temp_hum_control: false
+      light_cycle: 6to22
+      replicate_number: 2
+    processing:
       timeseries_smoothing_method: gaussian
       spike_window: 5
       spike_threshold: 10.0
+      baseline_correction_window: 50
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
+    outputs:
+      timeseries_x_axis: datetime
 
   # ============================================================================
   # IN PLANTA PROFILES - NB CONTROL (8to24, Temp/Hum controlled)

@@ -23,16 +23,22 @@ Key features:
 Install the package in development mode from the repository root:
 
 ```bash
-pip install -e .
+python -m pip install -e .
 ```
 
 This installs the package and exposes the `swnt_iaa_analysis` CLI; run these commands from the directory that contains `setup.py` and `config.yaml` (repository root).
+
+If the `swnt_iaa_analysis` command is not found in your shell, run the CLI module directly:
+
+```bash
+python -m swnt_iaa_analysis.cli analyze <profile_name>
+```
 
 ## Usage
 
 ### Command Line Interface
 
-The package provides three main commands for analyzing Raman spectroscopy data:
+The package provides four main commands for analyzing Raman spectroscopy data:
 
 #### 1. Analyze a Single Profile
 
