@@ -262,11 +262,10 @@ profiles:
       light_cycle: 6to22
       replicate_number: 1
     processing:
-      timeseries_smoothing_method: gaussian
+      timeseries_smoothing_method: savitzky #or gaussian
       spike_window: 5
       spike_threshold: 10.0
-      baseline_correction_threshold: 7
-      baseline_correction_window: 50
+      baseline_correction_threshold: 5
       fft_als_p: 0.0005
     outputs:
       timeseries_x_axis: datetime
@@ -287,12 +286,9 @@ profiles:
       light_cycle: 6to22
       replicate_number: 2
     processing:
-      timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       baseline_correction_threshold: 6
-      baseline_correction_window: 50
-      fft_gaussian_sigma: 30
+      fft_gaussian_sigma: 20
+      fft_als_lambda: 1000000
       fft_als_p: 0.01
     outputs:
       timeseries_x_axis: datetime
@@ -348,6 +344,13 @@ profiles:
       light_cycle: 6to22
       replicate_number: 2
     processing:
+      spike_window: 5
+      spike_threshold: 10.0
+      baseline_correction_threshold: 6
+      baseline_correction_window: 10
+      fft_gaussian_sigma: 20
+      fft_als_lambda: 1000000
+      fft_als_p: 0.001
     outputs:
       timeseries_x_axis: datetime
 
