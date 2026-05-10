@@ -20,9 +20,19 @@ class ConfigError(Exception):
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively merge two dictionaries."""
+    """Recursively merge two dictionaries.
+
+    Notes
+    -----
+    - If ``override`` contains a key whose value is ``None`` AND the same key in
+      ``base`` is a dict, the base dict is preserved. This matches what users
+      usually mean when they leave a YAML section empty (e.g. ``processing:``
+      with nothing under it) — they intend "use parent defaults", not "wipe it".
+    """
     result = copy.deepcopy(base)
     for key, value in (override or {}).items():
+        if value is None and isinstance(result.get(key), dict):
+            continue
         if isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = _deep_merge(result[key], value)
         else:
@@ -35,15 +45,18 @@ def _flatten_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     flat_config: Dict[str, Any] = {}
     # Flatten processing and outputs sections to top level
     for section in ("processing", "outputs"):
-        if section in profile:
-            flat_config.update(profile[section])
+        section_value = profile.get(section)
+        if isinstance(section_value, dict):
+            flat_config.update(section_value)
     # Include other top-level keys
     for key, value in profile.items():
         if key not in ("processing", "outputs", "data_source", "metadata", "inherits", "description"):
             flat_config[key] = value
     # Preserve nested sections
-    flat_config["data_source"] = profile.get("data_source", {}).copy()
-    flat_config["metadata"] = profile.get("metadata", {}).copy()
+    data_source = profile.get("data_source") or {}
+    metadata = profile.get("metadata") or {}
+    flat_config["data_source"] = data_source.copy() if isinstance(data_source, dict) else {}
+    flat_config["metadata"] = metadata.copy() if isinstance(metadata, dict) else {}
     flat_config["sections"] = copy.deepcopy(profile)
     return flat_config
 
