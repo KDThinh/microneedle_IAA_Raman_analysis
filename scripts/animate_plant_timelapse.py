@@ -77,7 +77,12 @@ def collect_tiff_files(input_dirs: list[Path]) -> list[Path]:
         ts = parse_timestamp_from_name(path)
         return (ts is None, ts or datetime.min, path.name)
 
-    return sorted(files, key=sort_key)
+    files = sorted(files, key=sort_key)
+    # Case-insensitive volumes may yield the same file from multiple TIFF_GLOBS (*.tif vs *.TIF).
+    uniq: dict[str, Path] = {}
+    for p in files:
+        uniq[str(p.resolve()).lower()] = p
+    return sorted(uniq.values(), key=sort_key)
 
 
 def resolve_image_view_dirs(dirs: Sequence[Path] | None) -> list[Path]:

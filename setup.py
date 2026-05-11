@@ -38,6 +38,9 @@ setup(
         "typer>=0.4.0",
         "tqdm>=4.60.0",
     ],
+    extras_require={
+        "plant_timelapse": ["opencv-python-headless>=4.5", "Pillow>=8.0"],
+    },
     entry_points={
         "console_scripts": [
             "swnt_iaa_analysis=swnt_iaa_analysis.cli:app",
