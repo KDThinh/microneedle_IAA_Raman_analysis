@@ -6,8 +6,9 @@ gradient magnitude. This script computes |∇I| with ``cv2.Sobel`` + ``cv2.magni
 optionally after Gaussian blur.
 
 **Bit depth (default 16-bit):** inputs are kept / promoted to ``uint16`` for
-processing and saved edge images (batch: ``*_edges.tif``). Pass ``--uint8`` for
-the previous 8-bit normalize-to-255 path (batch: ``*_edges.png``).
+processing. Single-frame ``--save-edges`` can write the Sobel magnitude; batch mode does not
+save standalone edge magnitude files (the preview figure includes the edge / mask panels).
+Pass ``--uint8`` for the 8-bit normalize-to-255 path.
 
 - **Single frame** (`--image`): matplotlib preview **3×3**: original, edge binary, post-blur
   binary; refined AND; **line-artifact mask**; **refined minus that mask**; then **growth
@@ -30,6 +31,10 @@ the previous 8-bit normalize-to-255 path (batch: ``*_edges.png``).
   kernel with auto sigma, which would be much weaker). Implemented as
   ``cv2.GaussianBlur(..., ksize=(0,0), sigmaX=sigma)`` so the kernel size follows sigma.
   Use **0** to disable. Then **post-threshold** (``--post-mask-thresh``, default **otsu**).
+  With **otsu**, optional ``--post-mask-otsu-margin`` subtracts from that threshold (0–255) so
+  dimmer interior regions stay above the cut when the plant would otherwise split. Batch can
+  enable ``--batch-adaptive-post-otsu`` to raise that margin frame-to-frame when the largest
+  connected component shrinks sharply vs. the previous frame (time-series guardrail).
 - **Post-blur binary** (``*_mask_final.png``): by default only the **largest**
   8-connected white region is kept (drop smaller slobs). Use
   ``--mask-keep-all-components`` to retain every foreground blob.
@@ -38,32 +43,39 @@ the previous 8-bit normalize-to-255 path (batch: ``*_edges.png``).
   exceeds a threshold — defaults **radius 2.0**, **threshold 50**, **bright** outliers only
   (white specks). Neighbourhood uses OpenCV ``medianBlur`` with odd k ≈ ``2*ceil(radius)+1``
   (square window, close to ImageJ's circular disk). Disable with ``--refined-outlier-radius 0``.
-- **Batch** (`--frames-dir` + ``--edges-out-dir``): edge images; optional
-  ``--mask-out-dir`` writes ``*_mask.png``, optional smeared/final when ``--mask-blur`` > 0,
-  ``*_mask_refined.png``. With ``--line-artifact morph`` and H/V sizes > 0:
-  ``*_mask_refined_lines.png`` / ``*_mask_refined_nolines.png``. With ``--line-artifact hough``:
-  ``*_mask_refined_hough_lines.png`` / ``*_mask_refined_hough_nolines.png``. With
-  ``--line-artifact merge``: writes morph + Hough intermediates above plus
-  ``*_mask_refined_merge_nolines.png`` (OR of the two cleaned masks) and
-  ``*_mask_refined_merge_removed.png`` (refined pixels removed only by the conservative merge).
-  With ``--line-artifact intensity``: ``*_mask_refined_intensity_dropped.png`` (refined pixels
-  dropped by the intensity gate) and ``*_mask_refined_intensity_nolines.png``.
+- **Batch** (``--frames-dir`` … + ``--preview-out-dir`` + ``--mask-out-dir``): requires all three.
+  Pass ``--frames-dir`` **once per root** (multiple directories); matches from ``--bg-glob`` are
+  merged, **deduplicated** by resolved path, sorted globally, then ``--frames-step`` applies.
+  With multiple roots, outputs are nested under ``<root_name>__<hash>/`` so identical relative paths
+  from different folders do not collide.
+  ``--preview-out-dir`` receives only ``*_preview.png`` (3×3 matplotlib summary per frame).
+  ``--mask-out-dir`` receives only ``*_mask_refined.png`` (refined ROI after edge AND post-blur,
+  including Remove Outliers when enabled). Intermediate masks (binary edge mask, smeared,
+  line-artifact intermediates, etc.) are computed in memory for previews and growth metrics but
+  are **not** written to disk. Optional ``--frames-step N`` (default 1) keeps every N-th file
+  after sorting ``--bg-glob`` matches. ``--growth-save-stabilized`` writes
+  ``*_mask_growth_stabilized.png`` under ``--preview-out-dir``. Use ``--growth-csv`` for CSV
+  metrics (same batch requirements). Optional ``--batch-mask-area-csv`` logs per-frame largest-CC
+  area on the post-Gaussian threshold (baseline vs after ``--batch-adaptive-post-otsu``).
 - **Growth metrics** (optional): stabilize the **line-artifact-cleaned** mask (morphological
   close, optional hole-fill, optional largest foreground via **connected components** or
   ``findContours`` largest external contour filled), then record **axis-aligned bbox
   height/width**, **min-area rectangle (oriented) width/height/angle**, and a **stem-length
   proxy** = 8-connected **geodesic diameter** on a morphological skeleton restricted to the
-  lower ``--growth-stem-frac`` of the bbox. Use ``--growth-csv`` (batch needs ``--mask-out-dir``);
-  ``--growth-save-stabilized`` writes ``*_mask_growth_stabilized.png`` per frame.
+  lower ``--growth-stem-frac`` of the bbox. Batch mode uses ``--growth-csv`` with the same
+  ``--frames-dir`` / ``--preview-out-dir`` / ``--mask-out-dir`` setup; ``--growth-save-stabilized``
+  in batch writes next to previews as above.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import re
 from collections import deque
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Sequence
 
 import cv2
 import matplotlib.patches as mpatches
@@ -139,6 +151,54 @@ def list_frames(directory: Path, pattern: str) -> list[Path]:
     if not paths:
         raise FileNotFoundError(f"No files matching {pattern!r} under {directory}")
     return paths
+
+
+def collect_batch_frame_paths(
+    frame_roots: Sequence[Path], pattern: str
+) -> list[tuple[Path, Path]]:
+    """
+    All batch inputs under one or more roots.
+
+    Returns ``(absolute_path, resolved_root)`` per file, sorted by path string.
+    If the same file appears under two roots, only the **first** root’s entry is kept.
+    """
+    roots: list[Path] = []
+    for d in frame_roots:
+        r = Path(d).resolve()
+        if not r.is_dir():
+            raise NotADirectoryError(r)
+        roots.append(r)
+    roots = list(dict.fromkeys(roots))
+    first_hit: dict[Path, Path] = {}
+    for root in roots:
+        for p in sorted(root.glob(pattern)):
+            if not p.is_file():
+                continue
+            key = p.resolve()
+            if key in first_hit:
+                continue
+            first_hit[key] = root
+    if not first_hit:
+        raise FileNotFoundError(
+            f"No files matching {pattern!r} under {len(roots)} frame root(s): "
+            + ", ".join(str(x) for x in roots)
+        )
+    out = [(path_abs, first_hit[path_abs]) for path_abs in first_hit]
+    out.sort(key=lambda t: t[0].as_posix().lower())
+    return out
+
+
+def _batch_output_anchor(resolved_root: Path) -> Path:
+    """
+    Subfolder under batch output dirs when multiple ``--frames-dir`` roots are used,
+    so two sources with the same relative path do not overwrite each other.
+    """
+    r = resolved_root.resolve()
+    digest = hashlib.sha256(str(r).encode("utf-8")).hexdigest()[:10]
+    tail = r.name or "root"
+    tail = re.sub(r"[^\w.\-]", "_", tail).strip("._") or "root"
+    tail = tail[:80]
+    return Path(f"{tail}__{digest}")
 
 
 def auto_contrast_limits(
@@ -327,10 +387,15 @@ def threshold_soft_uint8(
     soft: np.ndarray,
     mode: ThreshMode,
     fixed_thresh: int | None,
+    *,
+    otsu_margin: int = 0,
 ) -> tuple[np.ndarray, float]:
     """
     Binarize a soft ``uint8`` image (e.g. Gaussian-blurred mask) with Otsu, triangle,
     or fixed threshold (OpenCV auto methods require 8-bit).
+
+    For ``mode == "otsu"``, ``otsu_margin`` is subtracted from the raw Otsu level (then
+    clipped to 0–255) before binarizing: lower threshold keeps more of the blurred interior.
     """
     if soft.dtype != np.uint8:
         raise TypeError(f"soft image must be uint8; got {soft.dtype}")
@@ -340,10 +405,12 @@ def threshold_soft_uint8(
         bin8 = np.where(soft > t, 255, 0).astype(np.uint8)
         return bin8, float(t)
     if mode == "otsu":
-        ret, bin8 = cv2.threshold(
+        ret, _bin = cv2.threshold(
             soft, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
-        return bin8.astype(np.uint8), float(ret)
+        t = int(np.clip(int(round(float(ret))) - int(otsu_margin), 0, 255))
+        bin8 = np.where(soft > t, 255, 0).astype(np.uint8)
+        return bin8, float(t)
     ret, bin8 = cv2.threshold(
         soft, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_TRIANGLE
     )
@@ -698,6 +765,13 @@ def growth_csv_row(
     }
 
 
+MASK_AREA_CSV_FIELDNAMES = [
+    "index",
+    "file_name",
+    "original_binary_mask_area",
+    "adaptive_binary_mask_area",
+]
+
 GROWTH_CSV_FIELDNAMES = [
     "rel_path",
     "stem",
@@ -891,13 +965,31 @@ def parse_args() -> argparse.Namespace:
         description="Sobel Find Edges (ImageJ-like): 16-bit by default; optional 8-bit."
     )
     p.add_argument("--image", type=Path, default=None, help="Single image path.")
-    p.add_argument("--frames-dir", type=Path, default=None, help="Directory for batch mode.")
-    p.add_argument("--bg-glob", default="*.tif", help="Glob under --frames-dir (batch).")
     p.add_argument(
-        "--edges-out-dir",
+        "--frames-dir",
+        dest="frames_dirs",
+        action="append",
         type=Path,
         default=None,
-        help="Batch: write one edge image per input (mirrors subfolders).",
+        metavar="DIR",
+        help="Batch: input directory (repeat for multiple roots). "
+        "Glob --bg-glob in each; list is merged, deduped, sorted, then --frames-step applies.",
+    )
+    p.add_argument("--bg-glob", default="*.tif", help="Glob under each --frames-dir (batch).")
+    p.add_argument(
+        "--frames-step",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Batch: after sorting --bg-glob matches, process every N-th file only "
+        "(1 = all; 2 = first, third, fifth, … in sorted order). Must be >= 1.",
+    )
+    p.add_argument(
+        "--preview-out-dir",
+        type=Path,
+        default=None,
+        help="Batch: directory for *_preview.png only (3×3 matplotlib summary per frame). "
+        "Requires at least one --frames-dir and --mask-out-dir.",
     )
     p.add_argument(
         "--save-edges",
@@ -940,8 +1032,8 @@ def parse_args() -> argparse.Namespace:
         "--mask-out-dir",
         type=Path,
         default=None,
-        help="Batch: *_mask.png, *_mask_refined.png, optional smeared/final; line outputs "
-        "depend on --line-artifact (morph / hough / merge / intensity); mirrors subfolders.",
+        help="Batch: write only *_mask_refined.png per input (mirrors subfolders). "
+        "Requires --preview-out-dir. Sobel / intermediate masks are not saved to disk.",
     )
     p.add_argument(
         "--save-mask",
@@ -975,6 +1067,74 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="For --post-mask-thresh fixed: level 0–255 on blurred mask. Default 127 if omitted.",
+    )
+    p.add_argument(
+        "--post-mask-otsu-margin",
+        type=int,
+        default=0,
+        metavar="M",
+        help="When --post-mask-thresh otsu: subtract M from the Otsu threshold on the "
+        "Gaussian-blurred mask (after cv2 Otsu, clipped 0–255). Helps when the plant interior "
+        "is dim and the binary splits; try 5–25. Default 0. Ignored for triangle/fixed.",
+    )
+    p.add_argument(
+        "--batch-adaptive-post-otsu",
+        action="store_true",
+        help="Batch only: if largest-CC area on the post-blur binary is below a fraction of "
+        "the previous frame (see --adapt-post-otsu-trigger-ratio), increase post-Otsu margin "
+        "in steps until area reaches --adapt-post-otsu-target-ratio of the previous size or "
+        "margins cap out. Requires --post-mask-thresh otsu, --mask-blur > 0, and default "
+        "largest-component post-blur behavior (not --mask-keep-all-components).",
+    )
+    p.add_argument(
+        "--adapt-post-otsu-trigger-ratio",
+        type=float,
+        default=0.65,
+        metavar="R",
+        help="With --batch-adaptive-post-otsu: adapt only if largest-CC area < R × previous "
+        "(e.g. 0.65 ≈ 65%%). Default 0.65.",
+    )
+    p.add_argument(
+        "--adapt-post-otsu-target-ratio",
+        type=float,
+        default=0.90,
+        metavar="R",
+        help="With --batch-adaptive-post-otsu: stop raising margin when area ≥ R × previous. "
+        "Default 0.90.",
+    )
+    p.add_argument(
+        "--adapt-post-otsu-max-ratio",
+        type=float,
+        default=1.10,
+        metavar="R",
+        help="With --batch-adaptive-post-otsu: if area exceeds R × previous after a step, "
+        "stop (avoid runaway foreground). Default 1.10.",
+    )
+    p.add_argument(
+        "--adapt-post-otsu-margin-step",
+        type=int,
+        default=2,
+        metavar="S",
+        help="With --batch-adaptive-post-otsu: add S to margin each retry. Default 2.",
+    )
+    p.add_argument(
+        "--adapt-post-otsu-max-extra-margin",
+        type=int,
+        default=60,
+        metavar="M",
+        help="With --batch-adaptive-post-otsu: margin will not exceed "
+        "(--post-mask-otsu-margin + this value), capped at 255. Default 60.",
+    )
+    p.add_argument(
+        "--batch-mask-area-csv",
+        type=Path,
+        default=None,
+        help="Batch only: CSV with index, file_name (source path), "
+        "original_binary_mask_area, adaptive_binary_mask_area. Areas are pixel counts of the "
+        "largest 8-connected component on the **post-Gaussian** soft mask after thresholding "
+        "(baseline uses --post-mask-otsu-margin only; adaptive column uses the mask after "
+        "--batch-adaptive-post-otsu if that path changed the margin, else same as original). "
+        "If --mask-blur 0, both columns use the edge binary mask. Appends if the file exists.",
     )
     p.add_argument(
         "--save-final-mask",
@@ -1116,7 +1276,8 @@ def parse_args() -> argparse.Namespace:
         "--growth-csv",
         type=Path,
         default=None,
-        help="Append per-frame growth metrics (CSV). Batch mode requires --mask-out-dir. "
+        help="Append per-frame growth metrics (CSV). Batch mode requires --frames-dir (one or more), "
+        "--preview-out-dir, and --mask-out-dir. "
         "Columns: bbox height/width, OBB, stem geodesic diameter on stabilized mask.",
     )
     p.add_argument(
@@ -1171,8 +1332,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--growth-save-stabilized",
         action="store_true",
-        help="Save stabilized measurement mask: batch → *_mask_growth_stabilized.png beside "
-        "other masks; single-frame → <image_stem>_mask_growth_stabilized.png next to --image.",
+        help="Save stabilized measurement mask: batch → *_mask_growth_stabilized.png under "
+        "--preview-out-dir; single-frame → <image_stem>_mask_growth_stabilized.png next to --image.",
     )
     p.add_argument(
         "--growth-print",
@@ -1191,10 +1352,6 @@ def effective_line_artifact(ns: argparse.Namespace) -> LineArtifactMode:
     if la not in ("none", "morph", "hough", "merge", "intensity"):
         raise ValueError(la)
     return la  # type: ignore[return-value]
-
-
-def _batch_edges_suffix(uint8: bool) -> str:
-    return "_edges.png" if uint8 else "_edges.tif"
 
 
 def _fixed_thresh_resolved(
@@ -1217,11 +1374,305 @@ def _post_mask_fixed_resolved(
     return 127
 
 
+def plant_contour_preview_figure(
+    *,
+    title_name: str,
+    gray: np.ndarray,
+    edges: np.ndarray,
+    mask: np.ndarray,
+    mask_final: np.ndarray,
+    mask_refined: np.ndarray,
+    lines_union: np.ndarray,
+    mask_refined_nolines: np.ndarray,
+    t_used: float,
+    t_post: float | None,
+    mask_sigma: float,
+    thresh_mode: ThreshMode,
+    post_thresh_mode: ThreshMode,
+    uint8_pipeline: bool,
+    mask_keep_all_components: bool,
+    line_artifact: LineArtifactMode,
+    line_remove_horiz: int,
+    line_remove_vert: int,
+    n_hough_seg: int,
+    int_t_used: int,
+    growth_close_ksize: int,
+    growth_close_iters: int,
+    growth_fill_holes: bool,
+    growth_keep_largest: bool,
+    growth_largest_mode: GrowthLargestMode,
+    growth_stem_frac: float,
+    growth_skip_stem: bool,
+    preview_saturated: float,
+    preview_linear: bool,
+) -> plt.Figure:
+    """Build the 3×3 matplotlib figure used for interactive preview and batch ``*_preview.png``."""
+    g01, _ = preview_gray_edges_01(
+        gray,
+        edges,
+        saturated_fraction=preview_saturated,
+        linear=preview_linear,
+    )
+    m01 = (mask.astype(np.float64) / 255.0).clip(0.0, 1.0)
+    f01 = (mask_final.astype(np.float64) / 255.0).clip(0.0, 1.0)
+    r01 = (mask_refined.astype(np.float64) / 255.0).clip(0.0, 1.0)
+    lu01 = (lines_union.astype(np.float64) / 255.0).clip(0.0, 1.0)
+    nl01 = (mask_refined_nolines.astype(np.float64) / 255.0).clip(0.0, 1.0)
+    stab_pv = stabilize_plant_mask_for_measurement(
+        mask_refined_nolines,
+        close_ksize=growth_close_ksize,
+        close_iters=growth_close_iters,
+        fill_holes=growth_fill_holes,
+        keep_largest=growth_keep_largest,
+        largest_mode=growth_largest_mode,
+    )
+    stab01 = (stab_pv.astype(np.float64) / 255.0).clip(0.0, 1.0)
+    met_pv = growth_metrics_from_mask(
+        stab_pv,
+        stem_lower_frac=growth_stem_frac,
+        skip_stem=growth_skip_stem,
+    )
+    stem_sk = stem_skeleton_preview_mask(
+        stab_pv,
+        stem_lower_frac=growth_stem_frac,
+        skip_stem=growth_skip_stem,
+    )
+    sk01 = (stem_sk.astype(np.float64) / 255.0).clip(0.0, 1.0)
+    rch = np.clip(stab01 + 0.55 * sk01, 0.0, 1.0)
+    gch = np.clip(stab01 - 0.12 * sk01, 0.0, 1.0)
+    bch = np.clip(stab01 - 0.12 * sk01, 0.0, 1.0)
+    sk_overlay = np.dstack([rch, gch, bch])
+
+    fig, axes = plt.subplots(3, 3, figsize=(18, 13))
+    axes[0, 0].imshow(g01, cmap="gray", vmin=0, vmax=1)
+    axes[0, 0].set_title("Original")
+    axes[0, 1].imshow(m01, cmap="gray", vmin=0, vmax=1)
+    tlab = (
+        f"T={t_used:.1f}"
+        if thresh_mode != "triangle" or edges.dtype == np.uint8
+        else f"T_8bit={t_used:.1f}"
+    )
+    axes[0, 1].set_title(f"Binary after Find Edges\n({thresh_mode}, {tlab})")
+    axes[0, 2].imshow(f01, cmap="gray", vmin=0, vmax=1)
+    if mask_sigma > 0 and t_post is not None:
+        lf = "" if mask_keep_all_components else "\n(largest component only)"
+        axes[0, 2].set_title(
+            f"Binary after Gaussian blur{lf}\n"
+            f"({post_thresh_mode}, sigma={mask_sigma:g}, T_post={t_post:.1f})"
+        )
+    else:
+        axes[0, 2].set_title("Binary after blur\n(--mask-blur 0: same as center)")
+    axes[1, 0].imshow(r01, cmap="gray", vmin=0, vmax=1)
+    if mask_sigma > 0:
+        axes[1, 0].set_title("Refined ROI\n(edge AND post-blur)")
+    else:
+        axes[1, 0].set_title("Refined ROI\n(AND; blur off → same as row1 col2)")
+    axes[1, 1].imshow(lu01, cmap="gray", vmin=0, vmax=1)
+    if line_artifact == "morph":
+        if line_remove_horiz > 0 or line_remove_vert > 0:
+            axes[1, 1].set_title(
+                "Morph line mask\n"
+                f"(open {line_remove_horiz}x1 | 1x{line_remove_vert})"
+            )
+        else:
+            axes[1, 1].set_title("Morph line mask\n(sizes 0: empty)")
+    elif line_artifact == "hough":
+        axes[1, 1].set_title(f"Hough line mask\n({n_hough_seg} segments)")
+    elif line_artifact == "merge":
+        axes[1, 1].set_title(
+            "Merge: removed from refined\n(morph lines AND Hough lines)"
+        )
+    elif line_artifact == "intensity":
+        axes[1, 1].set_title(
+            f"Intensity-dropped pixels\n(gray < {int_t_used}/255 inside refined)"
+        )
+    else:
+        axes[1, 1].set_title("Line mask\n(--line-artifact none)")
+    axes[1, 2].imshow(nl01, cmap="gray", vmin=0, vmax=1)
+    if line_artifact == "morph":
+        axes[1, 2].set_title("Refined minus morph\n(refined AND NOT morph mask)")
+    elif line_artifact == "hough":
+        axes[1, 2].set_title("Refined minus Hough\n(refined AND NOT Hough mask)")
+    elif line_artifact == "merge":
+        axes[1, 2].set_title(
+            "Merge result\n(morph-cleaned OR Hough-cleaned refined)"
+        )
+    elif line_artifact == "intensity":
+        axes[1, 2].set_title(
+            "Intensity-gated refined\n(refined AND gray >= T_used)"
+        )
+    else:
+        axes[1, 2].set_title("Refined (unchanged)\n(no line subtraction)")
+
+    axes[2, 0].imshow(stab01, cmap="gray", vmin=0, vmax=1)
+    hole_lbl = " + fill holes" if growth_fill_holes else ""
+    if not growth_keep_largest:
+        lk_lbl = ""
+    elif growth_largest_mode == "contours":
+        lk_lbl = ", largest contour (filled)"
+    else:
+        lk_lbl = ", largest CC"
+    axes[2, 0].set_title(
+        "Stabilized (growth post-process)\n"
+        f"close k={growth_close_ksize}, iters={growth_close_iters}"
+        f"{hole_lbl}{lk_lbl}"
+    )
+    axes[2, 1].imshow(sk_overlay, vmin=0, vmax=1)
+    if growth_skip_stem:
+        axes[2, 1].set_title("Stem skeleton\n(--growth-skip-stem)")
+    else:
+        axes[2, 1].set_title(
+            "Stem skeleton (red tint)\n"
+            f"lower {growth_stem_frac:.0%} of axis bbox"
+        )
+    axes[2, 2].imshow(g01, cmap="gray", vmin=0, vmax=1)
+    bx, by, bbw, bbh = (
+        int(met_pv["bbox_x"]),
+        int(met_pv["bbox_y"]),
+        int(met_pv["bbox_w"]),
+        int(met_pv["bbox_h"]),
+    )
+    if bbw > 0 and bbh > 0:
+        axes[2, 2].add_patch(
+            mpatches.Rectangle(
+                (bx, by),
+                bbw,
+                bbh,
+                linewidth=1.2,
+                edgecolor="cyan",
+                facecolor="none",
+            )
+        )
+    fg255 = (stab_pv > 127).astype(np.uint8) * 255
+    conts, _ = cv2.findContours(fg255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if conts:
+        c0 = max(conts, key=cv2.contourArea)
+        obox = cv2.boxPoints(cv2.minAreaRect(c0))
+        axes[2, 2].add_patch(
+            mpatches.Polygon(
+                obox,
+                closed=True,
+                linewidth=1.0,
+                edgecolor="orange",
+                facecolor="none",
+            )
+        )
+    axes[2, 2].set_title(
+        "Bbox (cyan) + OBB (orange)\n"
+        f"axis h={met_pv['bbox_height_px']} w={met_pv['bbox_width_px']} "
+        f"stem_d={met_pv['stem_geodesic_diam_px']} fg={met_pv['fg_px']}"
+    )
+
+    for ax in axes.flat:
+        ax.axis("off")
+    depth = "uint8" if uint8_pipeline else "uint16"
+    prev = (
+        "linear"
+        if preview_linear
+        else f"IJ auto ({preview_saturated:g} sat/side)"
+    )
+    fig.suptitle(f"{title_name}  ({depth}, preview: {prev})")
+    fig.tight_layout()
+    return fig
+
+
+def _post_blur_mask_and_largest_cc_area(
+    smeared: np.ndarray,
+    post_mask_thresh: ThreshMode,
+    post_fixed_res: int | None,
+    otsu_margin: int,
+    mask_keep_all_components: bool,
+) -> tuple[np.ndarray, float, int]:
+    """
+    Post-threshold the blurred soft mask; return ``mask_final``, ``t_post``, and the pixel
+    count of the **largest** 8-connected foreground component of the raw threshold output
+    (used for batch temporal area comparison).
+    """
+    raw, t_post = threshold_soft_uint8(
+        smeared,
+        post_mask_thresh,
+        post_fixed_res,
+        otsu_margin=otsu_margin,
+    )
+    lcc = largest_connected_component_mask(raw)
+    largest_area = int((lcc > 127).sum())
+    if mask_keep_all_components:
+        mask_final = raw
+    else:
+        mask_final = lcc
+    return mask_final, t_post, largest_area
+
+
+def _adapt_post_otsu_margin_batch(
+    smeared: np.ndarray,
+    post_mask_thresh: ThreshMode,
+    post_fixed_res: int | None,
+    base_margin: int,
+    mask_keep_all_components: bool,
+    prev_largest_area: int | None,
+    *,
+    adapt_trigger_ratio: float,
+    adapt_target_ratio: float,
+    adapt_max_ratio: float,
+    margin_step: int,
+    max_extra_margin: int,
+) -> tuple[np.ndarray, float, int, int, bool]:
+    """
+    If the current largest-CC area is far below the previous frame's, raise ``otsu_margin``
+    in steps (lower soft threshold → larger foreground) until area recovers or caps hit.
+
+    Returns ``(mask_final, t_post, largest_area, margin_used, did_adapt)``.
+    """
+    mf, t, a = _post_blur_mask_and_largest_cc_area(
+        smeared,
+        post_mask_thresh,
+        post_fixed_res,
+        base_margin,
+        mask_keep_all_components,
+    )
+    margin = base_margin
+    if post_mask_thresh != "otsu":
+        return mf, t, a, margin, False
+    if prev_largest_area is None or prev_largest_area <= 0:
+        return mf, t, a, margin, False
+
+    target_min = float(prev_largest_area) * adapt_target_ratio
+    target_max = float(prev_largest_area) * adapt_max_ratio
+    trigger_low = float(prev_largest_area) * adapt_trigger_ratio
+
+    if a >= target_min:
+        return mf, t, a, margin, False
+    if a >= trigger_low:
+        # Between trigger and target: optional future nudge; keep single-shot for now
+        return mf, t, a, margin, False
+
+    max_margin = min(255, base_margin + max_extra_margin)
+    did_adapt = False
+    while margin < max_margin:
+        margin = min(max_margin, margin + margin_step)
+        did_adapt = True
+        mf, t, a = _post_blur_mask_and_largest_cc_area(
+            smeared,
+            post_mask_thresh,
+            post_fixed_res,
+            margin,
+            mask_keep_all_components,
+        )
+        if a >= target_min:
+            break
+        if a > target_max:
+            # Rare: huge overshoot; accept this frame as-is
+            break
+
+    return mf, t, a, margin, did_adapt
+
+
 def run_batch(
-    frames_dir: Path,
+    frames_dirs: Sequence[Path],
     bg_glob: str,
-    edges_out_dir: Path,
-    mask_out_dir: Path | None,
+    frames_step: int,
+    preview_out_dir: Path,
+    mask_out_dir: Path,
     blur: int,
     sobel_ksize: int,
     uint8: bool,
@@ -1230,6 +1681,13 @@ def run_batch(
     mask_blur_sigma: float,
     post_mask_thresh: ThreshMode,
     post_mask_fixed_thresh: int | None,
+    post_mask_otsu_margin: int,
+    batch_adaptive_post_otsu: bool,
+    adapt_post_otsu_trigger_ratio: float,
+    adapt_post_otsu_target_ratio: float,
+    adapt_post_otsu_max_ratio: float,
+    adapt_post_otsu_margin_step: int,
+    adapt_post_otsu_max_extra_margin: int,
     mask_keep_all_components: bool,
     line_remove_horiz: int,
     line_remove_vert: int,
@@ -1258,26 +1716,78 @@ def run_batch(
     growth_skip_stem: bool,
     growth_save_stabilized: bool,
     growth_print: bool,
+    mask_area_csv: Path | None,
 ) -> None:
-    frames_dir = frames_dir.resolve()
-    edges_out_dir = edges_out_dir.resolve()
-    edges_out_dir.mkdir(parents=True, exist_ok=True)
-    mask_root = mask_out_dir.resolve() if mask_out_dir else None
-    if mask_root:
-        mask_root.mkdir(parents=True, exist_ok=True)
-    paths = list_frames(frames_dir, bg_glob)
-    suffix = _batch_edges_suffix(uint8)
+    if not frames_dirs:
+        raise SystemExit("Batch mode requires at least one --frames-dir.")
+    preview_out_dir = preview_out_dir.resolve()
+    preview_out_dir.mkdir(parents=True, exist_ok=True)
+    mask_root = mask_out_dir.resolve()
+    mask_root.mkdir(parents=True, exist_ok=True)
+    roots_uniq = list(dict.fromkeys(Path(d).resolve() for d in frames_dirs))
+    n_roots = len(roots_uniq)
+    multi_root = n_roots > 1
+    root_anchor: dict[Path, Path] = {}
+    if multi_root:
+        for r in roots_uniq:
+            root_anchor[r] = _batch_output_anchor(r)
+    paths = collect_batch_frame_paths(frames_dirs, bg_glob)
+    if n_roots > 1:
+        print(
+            f"Batch: {n_roots} frame root(s), {len(paths)} file(s) matched before --frames-step.",
+            flush=True,
+        )
+    if frames_step < 1:
+        raise SystemExit("Batch mode: --frames-step must be an integer >= 1")
+    n_matched = len(paths)
+    paths = paths[::frames_step]
+    if frames_step > 1:
+        print(
+            f"Batch: --frames-step {frames_step} → processing {len(paths)} of {n_matched} "
+            "matched frames (sorted order)."
+        )
     fixed_res = _fixed_thresh_resolved(thresh, fixed_thresh, uint8)
     post_fixed_res = _post_mask_fixed_resolved(post_mask_thresh, post_mask_fixed_thresh)
-    n = 0
-    growth_any_batch = (
-        growth_csv is not None or growth_save_stabilized or growth_print
+    adapt_effective = (
+        batch_adaptive_post_otsu
+        and not mask_keep_all_components
+        and post_mask_thresh == "otsu"
+        and mask_blur_sigma > 0
     )
-    if growth_any_batch and mask_root is None:
+    if batch_adaptive_post_otsu:
+        if post_mask_thresh != "otsu":
+            raise SystemExit(
+                "Batch: --batch-adaptive-post-otsu requires --post-mask-thresh otsu."
+            )
+        if mask_blur_sigma <= 0:
+            print(
+                "Batch: --batch-adaptive-post-otsu ignored (--mask-blur 0; no soft post-threshold).",
+                flush=True,
+            )
+        if mask_keep_all_components:
+            print(
+                "Batch: --batch-adaptive-post-otsu ignored (--mask-keep-all-components; "
+                "largest-CC area is undefined for comparison).",
+                flush=True,
+            )
+    if (
+        adapt_post_otsu_trigger_ratio <= 0
+        or adapt_post_otsu_target_ratio <= 0
+        or adapt_post_otsu_max_ratio <= 0
+    ):
+        raise SystemExit("Adapt post-Otsu ratios must be positive.")
+    if adapt_post_otsu_trigger_ratio > adapt_post_otsu_target_ratio:
         raise SystemExit(
-            "Batch mode: growth options (--growth-csv, --growth-save-stabilized, "
-            "--growth-print) require --mask-out-dir"
+            "--adapt-post-otsu-trigger-ratio must be ≤ --adapt-post-otsu-target-ratio."
         )
+    if adapt_post_otsu_target_ratio > adapt_post_otsu_max_ratio:
+        raise SystemExit(
+            "--adapt-post-otsu-target-ratio must be ≤ --adapt-post-otsu-max-ratio."
+        )
+    if adapt_post_otsu_margin_step < 1:
+        raise SystemExit("--adapt-post-otsu-margin-step must be >= 1.")
+    if adapt_post_otsu_max_extra_margin < 0:
+        raise SystemExit("--adapt-post-otsu-max-extra-margin must be >= 0.")
     growth_f = None
     growth_w: csv.DictWriter | None = None
     if growth_csv is not None:
@@ -1288,285 +1798,294 @@ def run_batch(
         growth_w = csv.DictWriter(growth_f, fieldnames=GROWTH_CSV_FIELDNAMES)
         if write_header:
             growth_w.writeheader()
-    n_masks = 0
-    n_smeared = 0
-    n_final = 0
+    mask_area_f = None
+    mask_area_w: csv.DictWriter | None = None
+    if mask_area_csv is not None:
+        mac = mask_area_csv.resolve()
+        mac.parent.mkdir(parents=True, exist_ok=True)
+        ma_new = not mac.exists() or mac.stat().st_size == 0
+        mask_area_f = mac.open("a", newline="", encoding="utf-8")
+        mask_area_w = csv.DictWriter(mask_area_f, fieldnames=MASK_AREA_CSV_FIELDNAMES)
+        if ma_new:
+            mask_area_w.writeheader()
     n_refined = 0
-    n_lines = 0
-    n_nolines = 0
-    n_hough_lines = 0
-    n_hough_nolines = 0
-    n_merge_nolines = 0
-    n_merge_removed = 0
-    n_int_dropped = 0
-    n_int_nolines = 0
-    for p in paths:
-        gray = load_grayscale_working(p, uint8=uint8)
-        edges = sobel_find_edges(gray, blur_ksize=blur, sobel_ksize=sobel_ksize, uint8=uint8)
+    n_previews = 0
+    n_growth_stab = 0
+    n_adaptive_post_otsu = 0
+    n_total = len(paths)
+    prev_largest_area: int | None = None
+    for idx, (p, frame_root) in enumerate(paths, start=1):
         try:
-            rel = p.relative_to(frames_dir)
+            rel = p.relative_to(frame_root)
         except ValueError:
             rel = Path(p.name)
-        dest = edges_out_dir / rel.with_name(rel.stem + suffix)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(dest), edges):
-            raise OSError(f"cv2.imwrite failed: {dest}")
-        n += 1
-        if mask_root is not None:
-            mask, _ = threshold_binary_mask(edges, thresh, fixed_res)
-            mdest = mask_root / rel.with_name(rel.stem + "_mask.png")
-            mdest.parent.mkdir(parents=True, exist_ok=True)
-            if not cv2.imwrite(str(mdest), mask):
-                raise OSError(f"cv2.imwrite failed: {mdest}")
-            n_masks += 1
-            smeared, sig = gaussian_blur_binary_mask(mask, mask_blur_sigma)
-            if sig > 0:
-                sdest = mask_root / rel.with_name(rel.stem + "_mask_smeared.png")
-                sdest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(sdest), smeared):
-                    raise OSError(f"cv2.imwrite failed: {sdest}")
-                n_smeared += 1
-                mask_final, _ = threshold_soft_uint8(
-                    smeared, post_mask_thresh, post_fixed_res
-                )
-                if not mask_keep_all_components:
-                    mask_final = largest_connected_component_mask(mask_final)
-                fdest = mask_root / rel.with_name(rel.stem + "_mask_final.png")
-                fdest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(fdest), mask_final):
-                    raise OSError(f"cv2.imwrite failed: {fdest}")
-                n_final += 1
-            else:
-                mask_final = mask.copy()
-            mask_refined = refined_roi_and(mask, mask_final)
-            if refined_outlier_radius > 0:
-                mask_refined = refined_mask_remove_outliers(
-                    mask_refined,
-                    radius=refined_outlier_radius,
-                    threshold=refined_outlier_threshold,
-                    which=refined_outlier_which,
-                )
-            rdest = mask_root / rel.with_name(rel.stem + "_mask_refined.png")
-            rdest.parent.mkdir(parents=True, exist_ok=True)
-            if not cv2.imwrite(str(rdest), mask_refined):
-                raise OSError(f"cv2.imwrite failed: {rdest}")
-            n_refined += 1
-            mask_growth_src = mask_refined
-            if line_artifact == "morph" and (
-                line_remove_horiz > 0 or line_remove_vert > 0
-            ):
-                _lh, _lv, lines_u, mask_nolines = line_artifact_masks_and_cleaned(
-                    mask_refined, line_remove_horiz, line_remove_vert
-                )
-                ldest = mask_root / rel.with_name(rel.stem + "_mask_refined_lines.png")
-                ldest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(ldest), lines_u):
-                    raise OSError(f"cv2.imwrite failed: {ldest}")
-                n_lines += 1
-                ndest = mask_root / rel.with_name(rel.stem + "_mask_refined_nolines.png")
-                ndest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(ndest), mask_nolines):
-                    raise OSError(f"cv2.imwrite failed: {ndest}")
-                n_nolines += 1
-                mask_growth_src = mask_nolines
-            elif line_artifact == "hough":
-                g8 = gray_u8_for_canny(gray)
-                _canny, h_lm, _nseg = hough_prob_line_mask_from_gray(
-                    g8,
-                    canny1=hough_canny1,
-                    canny2=hough_canny2,
-                    hough_thresh=hough_threshold,
-                    min_line_len=hough_min_line_length,
-                    max_gap=hough_max_line_gap,
-                    line_thickness=hough_line_thickness,
-                    dilate_iter=hough_mask_dilate,
-                )
-                mh_clean = cv2.bitwise_and(mask_refined, cv2.bitwise_not(h_lm))
-                hldest = mask_root / rel.with_name(rel.stem + "_mask_refined_hough_lines.png")
-                hldest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(hldest), h_lm):
-                    raise OSError(f"cv2.imwrite failed: {hldest}")
-                n_hough_lines += 1
-                hndest = mask_root / rel.with_name(rel.stem + "_mask_refined_hough_nolines.png")
-                hndest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(hndest), mh_clean):
-                    raise OSError(f"cv2.imwrite failed: {hndest}")
-                n_hough_nolines += 1
-                mask_growth_src = mh_clean
-            elif line_artifact == "merge":
-                _lh, _lv, morph_lines, morph_clean = line_artifact_masks_and_cleaned(
-                    mask_refined, line_remove_horiz, line_remove_vert
-                )
-                ldest = mask_root / rel.with_name(rel.stem + "_mask_refined_lines.png")
-                ldest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(ldest), morph_lines):
-                    raise OSError(f"cv2.imwrite failed: {ldest}")
-                n_lines += 1
-                ndest = mask_root / rel.with_name(rel.stem + "_mask_refined_nolines.png")
-                ndest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(ndest), morph_clean):
-                    raise OSError(f"cv2.imwrite failed: {ndest}")
-                n_nolines += 1
-                g8 = gray_u8_for_canny(gray)
-                _canny, h_lm, _nseg = hough_prob_line_mask_from_gray(
-                    g8,
-                    canny1=hough_canny1,
-                    canny2=hough_canny2,
-                    hough_thresh=hough_threshold,
-                    min_line_len=hough_min_line_length,
-                    max_gap=hough_max_line_gap,
-                    line_thickness=hough_line_thickness,
-                    dilate_iter=hough_mask_dilate,
-                )
-                mh_clean = cv2.bitwise_and(mask_refined, cv2.bitwise_not(h_lm))
-                hldest = mask_root / rel.with_name(rel.stem + "_mask_refined_hough_lines.png")
-                hldest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(hldest), h_lm):
-                    raise OSError(f"cv2.imwrite failed: {hldest}")
-                n_hough_lines += 1
-                hndest = mask_root / rel.with_name(rel.stem + "_mask_refined_hough_nolines.png")
-                hndest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(hndest), mh_clean):
-                    raise OSError(f"cv2.imwrite failed: {hndest}")
-                n_hough_nolines += 1
-                merge_clean = cv2.bitwise_or(morph_clean, mh_clean)
-                mndest = mask_root / rel.with_name(rel.stem + "_mask_refined_merge_nolines.png")
-                mndest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(mndest), merge_clean):
-                    raise OSError(f"cv2.imwrite failed: {mndest}")
-                n_merge_nolines += 1
-                merge_removed = cv2.bitwise_and(
-                    mask_refined, cv2.bitwise_and(morph_lines, h_lm)
-                )
-                mrdest = mask_root / rel.with_name(rel.stem + "_mask_refined_merge_removed.png")
-                mrdest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(mrdest), merge_removed):
-                    raise OSError(f"cv2.imwrite failed: {mrdest}")
-                n_merge_removed += 1
-                mask_growth_src = merge_clean
-            elif line_artifact == "intensity":
-                int_dropped, int_clean, _t = intensity_gate_inside_refined(
-                    gray,
-                    mask_refined,
-                    saturated_fraction=preview_saturated,
-                    linear_preview=preview_linear,
-                    otsu_margin=intensity_otsu_margin,
-                    fixed_thresh=intensity_fixed_thresh,
-                )
-                iddest = mask_root / rel.with_name(rel.stem + "_mask_refined_intensity_dropped.png")
-                iddest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(iddest), int_dropped):
-                    raise OSError(f"cv2.imwrite failed: {iddest}")
-                n_int_dropped += 1
-                indest = mask_root / rel.with_name(rel.stem + "_mask_refined_intensity_nolines.png")
-                indest.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(indest), int_clean):
-                    raise OSError(f"cv2.imwrite failed: {indest}")
-                n_int_nolines += 1
-                mask_growth_src = int_clean
-            growth_need = (
-                growth_w is not None or growth_save_stabilized or growth_print
+        logical_key = (frame_root / rel).as_posix()
+        out_rel = rel if not multi_root else (root_anchor[frame_root] / rel)
+        print(f"Batch [{idx}/{n_total}] {logical_key}", flush=True)
+        gray = load_grayscale_working(p, uint8=uint8)
+        edges = sobel_find_edges(gray, blur_ksize=blur, sobel_ksize=sobel_ksize, uint8=uint8)
+        mask, t_used = threshold_binary_mask(edges, thresh, fixed_res)
+        smeared, sig = gaussian_blur_binary_mask(mask, mask_blur_sigma)
+        if sig > 0:
+            mask_final, t_post, original_area = _post_blur_mask_and_largest_cc_area(
+                smeared,
+                post_mask_thresh,
+                post_fixed_res,
+                post_mask_otsu_margin,
+                mask_keep_all_components,
             )
-            if growth_need:
-                stab = stabilize_plant_mask_for_measurement(
-                    mask_growth_src,
-                    close_ksize=growth_close_ksize,
-                    close_iters=growth_close_iters,
-                    fill_holes=growth_fill_holes,
-                    keep_largest=growth_keep_largest,
-                    largest_mode=growth_largest_mode,
-                )
-                met = growth_metrics_from_mask(
-                    stab,
-                    stem_lower_frac=growth_stem_frac,
-                    skip_stem=growth_skip_stem,
-                )
-                if growth_save_stabilized:
-                    gst = mask_root / rel.with_name(
-                        rel.stem + "_mask_growth_stabilized.png"
+            adaptive_area = original_area
+            if adapt_effective:
+                mask_final, t_post, adaptive_area, margin_used, did_adapt = (
+                    _adapt_post_otsu_margin_batch(
+                        smeared,
+                        post_mask_thresh,
+                        post_fixed_res,
+                        post_mask_otsu_margin,
+                        mask_keep_all_components,
+                        prev_largest_area,
+                        adapt_trigger_ratio=adapt_post_otsu_trigger_ratio,
+                        adapt_target_ratio=adapt_post_otsu_target_ratio,
+                        adapt_max_ratio=adapt_post_otsu_max_ratio,
+                        margin_step=adapt_post_otsu_margin_step,
+                        max_extra_margin=adapt_post_otsu_max_extra_margin,
                     )
-                    if not cv2.imwrite(str(gst), stab):
-                        raise OSError(f"cv2.imwrite failed: {gst}")
-                if growth_w is not None:
-                    row = growth_csv_row(
-                        str(rel).replace("\\", "/"),
-                        rel.stem,
-                        str(line_artifact),
-                        met,
-                    )
-                    growth_w.writerow(row)
-                if growth_print:
+                )
+                if did_adapt:
+                    n_adaptive_post_otsu += 1
                     print(
-                        f"Growth {rel.name}: bbox_h={met['bbox_height_px']} "
-                        f"bbox_w={met['bbox_width_px']} obb_h={met['obb_h_px']:.1f} "
-                        f"obb_w={met['obb_w_px']:.1f} stem_diam={met['stem_geodesic_diam_px']} "
-                        f"fg_px={met['fg_px']}"
+                        f"  adaptive post-Otsu: margin {post_mask_otsu_margin}→{margin_used}, "
+                        f"largest-CC area {adaptive_area} px "
+                        f"(prev {prev_largest_area} px)",
+                        flush=True,
                     )
+            prev_largest_area = adaptive_area
+        else:
+            mask_final = mask.copy()
+            t_post = None
+            _lcc = largest_connected_component_mask(mask_final)
+            original_area = adaptive_area = int((_lcc > 127).sum())
+            prev_largest_area = adaptive_area
+        if mask_area_w is not None:
+            mask_area_w.writerow(
+                {
+                    "index": idx,
+                    "file_name": logical_key.replace("\\", "/"),
+                    "original_binary_mask_area": original_area,
+                    "adaptive_binary_mask_area": adaptive_area,
+                }
+            )
+        mask_refined = refined_roi_and(mask, mask_final)
+        if refined_outlier_radius > 0:
+            mask_refined = refined_mask_remove_outliers(
+                mask_refined,
+                radius=refined_outlier_radius,
+                threshold=refined_outlier_threshold,
+                which=refined_outlier_which,
+            )
+        rdest = mask_root / out_rel.with_name(out_rel.stem + "_mask_refined.png")
+        rdest.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(rdest), mask_refined):
+            raise OSError(f"cv2.imwrite failed: {rdest}")
+        n_refined += 1
+        mask_growth_src = mask_refined
+        zline = np.zeros_like(mask_refined)
+        n_hough_seg = 0
+        int_t_used = 0
+        lines_union = zline
+        mask_refined_nolines = mask_refined.copy()
+        if line_artifact == "morph" and (
+            line_remove_horiz > 0 or line_remove_vert > 0
+        ):
+            _lh, _lv, lines_u, mask_nolines = line_artifact_masks_and_cleaned(
+                mask_refined, line_remove_horiz, line_remove_vert
+            )
+            lines_union = lines_u
+            mask_refined_nolines = mask_nolines
+            mask_growth_src = mask_nolines
+        elif line_artifact == "hough":
+            g8 = gray_u8_for_canny(gray)
+            _canny, h_lm, n_hough_seg = hough_prob_line_mask_from_gray(
+                g8,
+                canny1=hough_canny1,
+                canny2=hough_canny2,
+                hough_thresh=hough_threshold,
+                min_line_len=hough_min_line_length,
+                max_gap=hough_max_line_gap,
+                line_thickness=hough_line_thickness,
+                dilate_iter=hough_mask_dilate,
+            )
+            mh_clean = cv2.bitwise_and(mask_refined, cv2.bitwise_not(h_lm))
+            lines_union = h_lm
+            mask_refined_nolines = mh_clean
+            mask_growth_src = mh_clean
+        elif line_artifact == "merge":
+            _lh, _lv, morph_lines, morph_clean = line_artifact_masks_and_cleaned(
+                mask_refined, line_remove_horiz, line_remove_vert
+            )
+            g8 = gray_u8_for_canny(gray)
+            _canny, h_lm, n_hough_seg = hough_prob_line_mask_from_gray(
+                g8,
+                canny1=hough_canny1,
+                canny2=hough_canny2,
+                hough_thresh=hough_threshold,
+                min_line_len=hough_min_line_length,
+                max_gap=hough_max_line_gap,
+                line_thickness=hough_line_thickness,
+                dilate_iter=hough_mask_dilate,
+            )
+            mh_clean = cv2.bitwise_and(mask_refined, cv2.bitwise_not(h_lm))
+            merge_clean = cv2.bitwise_or(morph_clean, mh_clean)
+            merge_removed = cv2.bitwise_and(
+                mask_refined, cv2.bitwise_and(morph_lines, h_lm)
+            )
+            mask_growth_src = merge_clean
+            lines_union = merge_removed
+            mask_refined_nolines = merge_clean
+        elif line_artifact == "intensity":
+            int_dropped, int_clean, int_t_used = intensity_gate_inside_refined(
+                gray,
+                mask_refined,
+                saturated_fraction=preview_saturated,
+                linear_preview=preview_linear,
+                otsu_margin=intensity_otsu_margin,
+                fixed_thresh=intensity_fixed_thresh,
+            )
+            mask_growth_src = int_clean
+            lines_union = int_dropped
+            mask_refined_nolines = int_clean
+        growth_need = (
+            growth_w is not None or growth_save_stabilized or growth_print
+        )
+        if growth_need:
+            stab = stabilize_plant_mask_for_measurement(
+                mask_growth_src,
+                close_ksize=growth_close_ksize,
+                close_iters=growth_close_iters,
+                fill_holes=growth_fill_holes,
+                keep_largest=growth_keep_largest,
+                largest_mode=growth_largest_mode,
+            )
+            met = growth_metrics_from_mask(
+                stab,
+                stem_lower_frac=growth_stem_frac,
+                skip_stem=growth_skip_stem,
+            )
+            if growth_save_stabilized:
+                gst = preview_out_dir / out_rel.with_name(
+                    out_rel.stem + "_mask_growth_stabilized.png"
+                )
+                gst.parent.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(gst), stab):
+                    raise OSError(f"cv2.imwrite failed: {gst}")
+                n_growth_stab += 1
+            if growth_w is not None:
+                row = growth_csv_row(
+                    logical_key.replace("\\", "/"),
+                    rel.stem,
+                    str(line_artifact),
+                    met,
+                )
+                growth_w.writerow(row)
+            if growth_print:
+                print(
+                    f"Growth {rel.name}: bbox_h={met['bbox_height_px']} "
+                    f"bbox_w={met['bbox_width_px']} obb_h={met['obb_h_px']:.1f} "
+                    f"obb_w={met['obb_w_px']:.1f} stem_diam={met['stem_geodesic_diam_px']} "
+                    f"fg_px={met['fg_px']}"
+                )
+        preview_path = preview_out_dir / out_rel.with_name(out_rel.stem + "_preview.png")
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        fig = plant_contour_preview_figure(
+            title_name=logical_key.replace("\\", "/"),
+            gray=gray,
+            edges=edges,
+            mask=mask,
+            mask_final=mask_final,
+            mask_refined=mask_refined,
+            lines_union=lines_union,
+            mask_refined_nolines=mask_refined_nolines,
+            t_used=t_used,
+            t_post=t_post,
+            mask_sigma=float(sig),
+            thresh_mode=thresh,
+            post_thresh_mode=post_mask_thresh,
+            uint8_pipeline=uint8,
+            mask_keep_all_components=mask_keep_all_components,
+            line_artifact=line_artifact,
+            line_remove_horiz=line_remove_horiz,
+            line_remove_vert=line_remove_vert,
+            n_hough_seg=n_hough_seg,
+            int_t_used=int_t_used,
+            growth_close_ksize=growth_close_ksize,
+            growth_close_iters=growth_close_iters,
+            growth_fill_holes=growth_fill_holes,
+            growth_keep_largest=growth_keep_largest,
+            growth_largest_mode=growth_largest_mode,
+            growth_stem_frac=growth_stem_frac,
+            growth_skip_stem=growth_skip_stem,
+            preview_saturated=preview_saturated,
+            preview_linear=preview_linear,
+        )
+        fig.savefig(str(preview_path), dpi=110, bbox_inches="tight")
+        plt.close(fig)
+        n_previews += 1
     if growth_f is not None:
         growth_f.close()
-    print(f"Wrote {n} edge images ({'uint8 PNG' if uint8 else 'uint16 TIFF'}) under {edges_out_dir}")
-    if mask_root:
-        print(f"Wrote {n_masks} binary masks under {mask_root}")
-        print(f"Wrote {n_refined} refined masks (*_mask_refined.png) under {mask_root}")
-        if refined_outlier_radius > 0:
-            _k = max(3, 2 * int(np.ceil(float(refined_outlier_radius))) + 1)
-            if _k % 2 == 0:
-                _k += 1
-            _k = min(_k, 255)
-            print(
-                f"Each refined mask: Remove Outliers applied (radius={refined_outlier_radius:g}, "
-                f"threshold={refined_outlier_threshold:g}, which={refined_outlier_which}, "
-                f"medianBlur ksize={_k})."
-            )
-        if line_artifact == "morph" and (line_remove_horiz > 0 or line_remove_vert > 0):
-            print(f"Wrote {n_lines} morph line masks (*_mask_refined_lines.png) under {mask_root}")
-            print(f"Wrote {n_nolines} morph-cleaned masks (*_mask_refined_nolines.png) under {mask_root}")
-        elif line_artifact == "hough":
-            print(
-                f"Wrote {n_hough_lines} Hough line masks (*_mask_refined_hough_lines.png) "
-                f"and {n_hough_nolines} Hough-cleaned masks (*_mask_refined_hough_nolines.png) "
-                f"under {mask_root}"
-            )
-        elif line_artifact == "merge":
-            print(
-                f"Wrote {n_lines} morph line masks, {n_nolines} morph-cleaned, "
-                f"{n_hough_lines} Hough line masks, {n_hough_nolines} Hough-cleaned, "
-                f"{n_merge_nolines} merge OR masks (*_mask_refined_merge_nolines.png), "
-                f"{n_merge_removed} merge-removed (*_mask_refined_merge_removed.png) "
-                f"under {mask_root}"
-            )
-            if line_remove_horiz <= 0 and line_remove_vert <= 0:
-                print(
-                    "Note: merge with --line-remove-horiz / --line-remove-vert both 0: "
-                    "morph leg is empty; merge OR equals Hough-cleaned only per frame."
-                )
-        elif line_artifact == "intensity":
-            print(
-                f"Wrote {n_int_dropped} intensity-dropped masks (*_mask_refined_intensity_dropped.png) "
-                f"and {n_int_nolines} intensity-cleaned masks (*_mask_refined_intensity_nolines.png) "
-                f"under {mask_root}"
-            )
-        if mask_blur_sigma > 0:
-            print(f"Wrote {n_smeared} smeared masks (*_mask_smeared.png) under {mask_root}")
-            print(f"Wrote {n_final} post-threshold masks (*_mask_final.png) under {mask_root}")
+    if mask_area_f is not None:
+        mask_area_f.close()
+    if n_adaptive_post_otsu > 0:
+        print(
+            f"Batch adaptive post-Otsu: adjusted {n_adaptive_post_otsu} frame(s) "
+            "(see per-frame lines)."
+        )
+    print(f"Wrote {n_refined} refined ROI masks (*_mask_refined.png) under {mask_root}")
+    print(f"Wrote {n_previews} preview PNGs (*_preview.png) under {preview_out_dir}")
+    if n_growth_stab > 0:
+        print(
+            f"Wrote {n_growth_stab} growth stabilized masks (*_mask_growth_stabilized.png) "
+            f"under {preview_out_dir}"
+        )
+    if refined_outlier_radius > 0:
+        _k = max(3, 2 * int(np.ceil(float(refined_outlier_radius))) + 1)
+        if _k % 2 == 0:
+            _k += 1
+        _k = min(_k, 255)
+        print(
+            f"Each refined mask: Remove Outliers applied (radius={refined_outlier_radius:g}, "
+            f"threshold={refined_outlier_threshold:g}, which={refined_outlier_which}, "
+            f"medianBlur ksize={_k})."
+        )
+    if line_artifact == "merge" and line_remove_horiz <= 0 and line_remove_vert <= 0:
+        print(
+            "Note: merge with --line-remove-horiz / --line-remove-vert both 0: "
+            "morph leg is empty; merge OR equals Hough-cleaned only per frame."
+        )
     if growth_csv is not None:
         print(f"Growth metrics appended to {growth_csv.resolve()}")
+    if mask_area_csv is not None:
+        print(f"Post-blur largest-CC mask areas appended to {mask_area_csv.resolve()}")
 
 
 def main() -> None:
     args = parse_args()
     u8 = bool(args.uint8)
 
-    if args.frames_dir is not None:
-        if args.edges_out_dir is None:
-            raise SystemExit("Batch mode requires --edges-out-dir")
+    if args.frames_dirs is not None:
+        if not args.frames_dirs:
+            raise SystemExit("Batch mode requires at least one --frames-dir.")
+        if args.preview_out_dir is None:
+            raise SystemExit("Batch mode requires --preview-out-dir")
+        if args.mask_out_dir is None:
+            raise SystemExit("Batch mode requires --mask-out-dir")
         tm: ThreshMode = args.thresh  # type: ignore[assignment]
         ptm: ThreshMode = args.post_mask_thresh  # type: ignore[assignment]
         la: LineArtifactMode = effective_line_artifact(args)
         run_batch(
-            args.frames_dir,
+            args.frames_dirs,
             args.bg_glob,
-            args.edges_out_dir,
+            args.frames_step,
+            args.preview_out_dir,
             args.mask_out_dir,
             blur=args.blur,
             sobel_ksize=args.sobel_ksize,
@@ -1576,6 +2095,13 @@ def main() -> None:
             mask_blur_sigma=args.mask_blur,
             post_mask_thresh=ptm,
             post_mask_fixed_thresh=args.post_mask_fixed_thresh,
+            post_mask_otsu_margin=args.post_mask_otsu_margin,
+            batch_adaptive_post_otsu=bool(args.batch_adaptive_post_otsu),
+            adapt_post_otsu_trigger_ratio=args.adapt_post_otsu_trigger_ratio,
+            adapt_post_otsu_target_ratio=args.adapt_post_otsu_target_ratio,
+            adapt_post_otsu_max_ratio=args.adapt_post_otsu_max_ratio,
+            adapt_post_otsu_margin_step=args.adapt_post_otsu_margin_step,
+            adapt_post_otsu_max_extra_margin=args.adapt_post_otsu_max_extra_margin,
             mask_keep_all_components=bool(args.mask_keep_all_components),
             line_remove_horiz=args.line_remove_horiz,
             line_remove_vert=args.line_remove_vert,
@@ -1604,11 +2130,15 @@ def main() -> None:
             growth_skip_stem=bool(args.growth_skip_stem),
             growth_save_stabilized=bool(args.growth_save_stabilized),
             growth_print=bool(args.growth_print),
+            mask_area_csv=args.batch_mask_area_csv,
         )
         return
 
     if args.image is None:
-        raise SystemExit("Pass --image (single-frame), or --frames-dir with --edges-out-dir (batch).")
+        raise SystemExit(
+            "Pass --image (single-frame), or at least one --frames-dir with --preview-out-dir and "
+            "--mask-out-dir (batch)."
+        )
 
     image = args.image.resolve()
     if not image.is_file():
@@ -1624,7 +2154,12 @@ def main() -> None:
     mask, t_used = threshold_binary_mask(edges, tm, fixed_only)
     smeared, mask_sigma = gaussian_blur_binary_mask(mask, args.mask_blur)
     if mask_sigma > 0:
-        mask_final, t_post = threshold_soft_uint8(smeared, post_tm, post_fixed_only)
+        mask_final, t_post = threshold_soft_uint8(
+            smeared,
+            post_tm,
+            post_fixed_only,
+            otsu_margin=args.post_mask_otsu_margin,
+        )
         if not args.mask_keep_all_components:
             mask_final = largest_connected_component_mask(mask_final)
     else:
@@ -1808,6 +2343,11 @@ def main() -> None:
         if t_post is not None:
             if post_tm == "fixed":
                 print(f"Post-blur threshold (fixed): {t_post:.2f}")
+            elif post_tm == "otsu" and args.post_mask_otsu_margin != 0:
+                print(
+                    f"Post-blur threshold (otsu, used after --post-mask-otsu-margin "
+                    f"{args.post_mask_otsu_margin}): {t_post:.2f}"
+                )
             else:
                 print(f"Post-blur threshold ({post_tm}): {t_post:.2f}")
     else:
@@ -1869,172 +2409,37 @@ def main() -> None:
         print("Line-artifact removal: none (--line-artifact none).")
 
     if not args.no_show:
-        g01, _ = preview_gray_edges_01(
-            gray,
-            edges,
-            saturated_fraction=args.preview_saturated,
-            linear=bool(args.preview_linear),
+        fig = plant_contour_preview_figure(
+            title_name=image.name,
+            gray=gray,
+            edges=edges,
+            mask=mask,
+            mask_final=mask_final,
+            mask_refined=mask_refined,
+            lines_union=lines_union,
+            mask_refined_nolines=mask_refined_nolines,
+            t_used=t_used,
+            t_post=t_post,
+            mask_sigma=float(mask_sigma),
+            thresh_mode=tm,
+            post_thresh_mode=post_tm,
+            uint8_pipeline=u8,
+            mask_keep_all_components=bool(args.mask_keep_all_components),
+            line_artifact=la,
+            line_remove_horiz=args.line_remove_horiz,
+            line_remove_vert=args.line_remove_vert,
+            n_hough_seg=n_hough_seg,
+            int_t_used=int_t_used,
+            growth_close_ksize=args.growth_close_ksize,
+            growth_close_iters=args.growth_close_iters,
+            growth_fill_holes=bool(args.growth_fill_holes),
+            growth_keep_largest=not bool(args.growth_no_keep_largest),
+            growth_largest_mode=args.growth_largest_mode,  # type: ignore[arg-type]
+            growth_stem_frac=args.growth_stem_frac,
+            growth_skip_stem=bool(args.growth_skip_stem),
+            preview_saturated=args.preview_saturated,
+            preview_linear=bool(args.preview_linear),
         )
-        m01 = (mask.astype(np.float64) / 255.0).clip(0.0, 1.0)
-        f01 = (mask_final.astype(np.float64) / 255.0).clip(0.0, 1.0)
-        r01 = (mask_refined.astype(np.float64) / 255.0).clip(0.0, 1.0)
-        lu01 = (lines_union.astype(np.float64) / 255.0).clip(0.0, 1.0)
-        nl01 = (mask_refined_nolines.astype(np.float64) / 255.0).clip(0.0, 1.0)
-        stab_pv = stabilize_plant_mask_for_measurement(
-            mask_refined_nolines,
-            close_ksize=args.growth_close_ksize,
-            close_iters=args.growth_close_iters,
-            fill_holes=bool(args.growth_fill_holes),
-            keep_largest=not bool(args.growth_no_keep_largest),
-            largest_mode=args.growth_largest_mode,  # type: ignore[arg-type]
-        )
-        stab01 = (stab_pv.astype(np.float64) / 255.0).clip(0.0, 1.0)
-        met_pv = growth_metrics_from_mask(
-            stab_pv,
-            stem_lower_frac=args.growth_stem_frac,
-            skip_stem=bool(args.growth_skip_stem),
-        )
-        stem_sk = stem_skeleton_preview_mask(
-            stab_pv,
-            stem_lower_frac=args.growth_stem_frac,
-            skip_stem=bool(args.growth_skip_stem),
-        )
-        sk01 = (stem_sk.astype(np.float64) / 255.0).clip(0.0, 1.0)
-        rch = np.clip(stab01 + 0.55 * sk01, 0.0, 1.0)
-        gch = np.clip(stab01 - 0.12 * sk01, 0.0, 1.0)
-        bch = np.clip(stab01 - 0.12 * sk01, 0.0, 1.0)
-        sk_overlay = np.dstack([rch, gch, bch])
-
-        fig, axes = plt.subplots(3, 3, figsize=(18, 13))
-        axes[0, 0].imshow(g01, cmap="gray", vmin=0, vmax=1)
-        axes[0, 0].set_title("Original")
-        axes[0, 1].imshow(m01, cmap="gray", vmin=0, vmax=1)
-        tlab = (
-            f"T={t_used:.1f}"
-            if tm != "triangle" or edges.dtype == np.uint8
-            else f"T_8bit={t_used:.1f}"
-        )
-        axes[0, 1].set_title(f"Binary after Find Edges\n({tm}, {tlab})")
-        axes[0, 2].imshow(f01, cmap="gray", vmin=0, vmax=1)
-        if mask_sigma > 0 and t_post is not None:
-            lf = (
-                ""
-                if args.mask_keep_all_components
-                else "\n(largest component only)"
-            )
-            axes[0, 2].set_title(
-                f"Binary after Gaussian blur{lf}\n"
-                f"({post_tm}, sigma={mask_sigma:g}, T_post={t_post:.1f})"
-            )
-        else:
-            axes[0, 2].set_title("Binary after blur\n(--mask-blur 0: same as center)")
-        axes[1, 0].imshow(r01, cmap="gray", vmin=0, vmax=1)
-        if mask_sigma > 0:
-            axes[1, 0].set_title("Refined ROI\n(edge AND post-blur)")
-        else:
-            axes[1, 0].set_title("Refined ROI\n(AND; blur off → same as row1 col2)")
-        axes[1, 1].imshow(lu01, cmap="gray", vmin=0, vmax=1)
-        if la == "morph":
-            if args.line_remove_horiz > 0 or args.line_remove_vert > 0:
-                axes[1, 1].set_title(
-                    "Morph line mask\n"
-                    f"(open {args.line_remove_horiz}x1 | 1x{args.line_remove_vert})"
-                )
-            else:
-                axes[1, 1].set_title("Morph line mask\n(sizes 0: empty)")
-        elif la == "hough":
-            axes[1, 1].set_title(f"Hough line mask\n({n_hough_seg} segments)")
-        elif la == "merge":
-            axes[1, 1].set_title(
-                "Merge: removed from refined\n(morph lines AND Hough lines)"
-            )
-        elif la == "intensity":
-            axes[1, 1].set_title(
-                f"Intensity-dropped pixels\n(gray < {int_t_used}/255 inside refined)"
-            )
-        else:
-            axes[1, 1].set_title("Line mask\n(--line-artifact none)")
-        axes[1, 2].imshow(nl01, cmap="gray", vmin=0, vmax=1)
-        if la == "morph":
-            axes[1, 2].set_title("Refined minus morph\n(refined AND NOT morph mask)")
-        elif la == "hough":
-            axes[1, 2].set_title("Refined minus Hough\n(refined AND NOT Hough mask)")
-        elif la == "merge":
-            axes[1, 2].set_title(
-                "Merge result\n(morph-cleaned OR Hough-cleaned refined)"
-            )
-        elif la == "intensity":
-            axes[1, 2].set_title(
-                "Intensity-gated refined\n(refined AND gray >= T_used)"
-            )
-        else:
-            axes[1, 2].set_title("Refined (unchanged)\n(no line subtraction)")
-
-        axes[2, 0].imshow(stab01, cmap="gray", vmin=0, vmax=1)
-        hole_lbl = " + fill holes" if args.growth_fill_holes else ""
-        if args.growth_no_keep_largest:
-            lk_lbl = ""
-        elif args.growth_largest_mode == "contours":
-            lk_lbl = ", largest contour (filled)"
-        else:
-            lk_lbl = ", largest CC"
-        axes[2, 0].set_title(
-            "Stabilized (growth post-process)\n"
-            f"close k={args.growth_close_ksize}, iters={args.growth_close_iters}"
-            f"{hole_lbl}{lk_lbl}"
-        )
-        axes[2, 1].imshow(sk_overlay, vmin=0, vmax=1)
-        if args.growth_skip_stem:
-            axes[2, 1].set_title("Stem skeleton\n(--growth-skip-stem)")
-        else:
-            axes[2, 1].set_title(
-                "Stem skeleton (red tint)\n"
-                f"lower {args.growth_stem_frac:.0%} of axis bbox"
-            )
-        axes[2, 2].imshow(g01, cmap="gray", vmin=0, vmax=1)
-        bx, by, bbw, bbh = (
-            int(met_pv["bbox_x"]),
-            int(met_pv["bbox_y"]),
-            int(met_pv["bbox_w"]),
-            int(met_pv["bbox_h"]),
-        )
-        if bbw > 0 and bbh > 0:
-            axes[2, 2].add_patch(
-                mpatches.Rectangle(
-                    (bx, by),
-                    bbw,
-                    bbh,
-                    linewidth=1.2,
-                    edgecolor="cyan",
-                    facecolor="none",
-                )
-            )
-        fg255 = (stab_pv > 127).astype(np.uint8) * 255
-        conts, _ = cv2.findContours(fg255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if conts:
-            c0 = max(conts, key=cv2.contourArea)
-            obox = cv2.boxPoints(cv2.minAreaRect(c0))
-            axes[2, 2].add_patch(
-                mpatches.Polygon(
-                    obox,
-                    closed=True,
-                    linewidth=1.0,
-                    edgecolor="orange",
-                    facecolor="none",
-                )
-            )
-        axes[2, 2].set_title(
-            "Bbox (cyan) + OBB (orange)\n"
-            f"axis h={met_pv['bbox_height_px']} w={met_pv['bbox_width_px']} "
-            f"stem_d={met_pv['stem_geodesic_diam_px']} fg={met_pv['fg_px']}"
-        )
-
-        for ax in axes.flat:
-            ax.axis("off")
-        depth = "uint8" if u8 else "uint16"
-        prev = "linear" if args.preview_linear else f"IJ auto ({args.preview_saturated:g} sat/side)"
-        plt.suptitle(f"{image.name}  ({depth}, preview: {prev})")
-        plt.tight_layout()
         plt.show()
 
 
