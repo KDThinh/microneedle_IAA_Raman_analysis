@@ -1,4 +1,4 @@
-"""Create a timelapse animation (GIF/MP4) from timestamped TIFF image folders."""
+"""Create a timelapse animation (GIF/MP4) from timestamped image folders (TIFF or PNG)."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ import numpy as np
 from PIL import Image
 
 # Quick tuning guide:
-# - Per-frame contrast: TIFFs use luminance percentile stretch (2–98% by default),
+# - Per-frame contrast: images use luminance percentile stretch (2–98% by default),
 #   not a global fixed scale across the timelapse.
+# - --formats: choose input image types (tiff, png, or both). Default: tiff.
 # - --frame-step: keep every Nth image (higher = smaller/faster output).
 # - --max-width: resize frames to this width (preserves aspect ratio).
 # - --fps: playback speed.
@@ -35,6 +36,30 @@ DEFAULT_DIRS = [
 ]
 
 TIFF_GLOBS = ("*.tif", "*.tiff", "*.TIF", "*.TIFF")
+PNG_GLOBS = ("*.png", "*.PNG")
+IMAGE_GLOBS = TIFF_GLOBS + PNG_GLOBS
+
+FORMAT_GLOBS: dict[str, tuple[str, ...]] = {
+    "tiff": TIFF_GLOBS,
+    "tif": TIFF_GLOBS,
+    "png": PNG_GLOBS,
+}
+
+
+def resolve_format_globs(formats: Sequence[str]) -> tuple[str, ...]:
+    """Map user-supplied format names (e.g. ``["tiff", "png"]``) to file globs."""
+    if not formats:
+        raise ValueError("At least one format must be specified.")
+    globs: list[str] = []
+    for fmt in formats:
+        key = fmt.lower().strip()
+        if key not in FORMAT_GLOBS:
+            valid = sorted({k for k in FORMAT_GLOBS if k != "tif"})
+            raise ValueError(f"Unknown image format {fmt!r}. Choose from: {valid}.")
+        globs.extend(FORMAT_GLOBS[key])
+    # Preserve order, drop duplicates (case-sensitive globs may overlap on case-insensitive FS).
+    seen: set[str] = set()
+    return tuple(g for g in globs if not (g in seen or seen.add(g)))
 
 
 def parse_timestamp_from_name(path: Path) -> datetime | None:
@@ -61,28 +86,43 @@ def parse_timestamp_from_name(path: Path) -> datetime | None:
     return None
 
 
-def collect_tiff_files(input_dirs: list[Path]) -> list[Path]:
+def collect_image_files(
+    input_dirs: list[Path],
+    globs: Sequence[str] = TIFF_GLOBS,
+) -> list[Path]:
+    """Collect image files matching ``globs`` across the given directories, sorted by timestamp.
+
+    Defaults to TIFF globs to preserve the historical behaviour of
+    :func:`collect_tiff_files`; pass ``PNG_GLOBS`` or ``IMAGE_GLOBS`` to read PNGs.
+    """
     files: list[Path] = []
     for directory in input_dirs:
         if not directory.exists():
             print(f"Warning: directory not found, skipping: {directory}")
             continue
-        for pattern in TIFF_GLOBS:
+        for pattern in globs:
             files.extend(directory.glob(pattern))
 
     if not files:
-        raise FileNotFoundError("No TIFF files found in input directories.")
+        raise FileNotFoundError(
+            f"No image files matching {tuple(globs)} found in input directories."
+        )
 
     def sort_key(path: Path):
         ts = parse_timestamp_from_name(path)
         return (ts is None, ts or datetime.min, path.name)
 
     files = sorted(files, key=sort_key)
-    # Case-insensitive volumes may yield the same file from multiple TIFF_GLOBS (*.tif vs *.TIF).
+    # Case-insensitive volumes may yield the same file from multiple globs (e.g. *.tif vs *.TIF).
     uniq: dict[str, Path] = {}
     for p in files:
         uniq[str(p.resolve()).lower()] = p
     return sorted(uniq.values(), key=sort_key)
+
+
+def collect_tiff_files(input_dirs: list[Path]) -> list[Path]:
+    """Backwards-compatible TIFF-only wrapper around :func:`collect_image_files`."""
+    return collect_image_files(input_dirs, globs=TIFF_GLOBS)
 
 
 def resolve_image_view_dirs(dirs: Sequence[Path] | None) -> list[Path]:
@@ -112,17 +152,25 @@ def resolve_image_view_dirs(dirs: Sequence[Path] | None) -> list[Path]:
     return resolved
 
 
-def collect_tiff_timeline(input_dirs: list[Path]) -> list[tuple[datetime, Path]]:
-    """Return TIFF files with parsed timestamps for timeline syncing."""
-    files = collect_tiff_files(input_dirs)
+def collect_image_timeline(
+    input_dirs: list[Path],
+    globs: Sequence[str] = TIFF_GLOBS,
+) -> list[tuple[datetime, Path]]:
+    """Return image files with parsed timestamps for timeline syncing."""
+    files = collect_image_files(input_dirs, globs=globs)
     timeline: list[tuple[datetime, Path]] = []
     for file_path in files:
         ts = parse_timestamp_from_name(file_path)
         if ts is not None:
             timeline.append((ts, file_path))
     if not timeline:
-        raise ValueError("No timestamp could be parsed from TIFF filenames.")
+        raise ValueError("No timestamp could be parsed from image filenames.")
     return timeline
+
+
+def collect_tiff_timeline(input_dirs: list[Path]) -> list[tuple[datetime, Path]]:
+    """Backwards-compatible TIFF-only wrapper around :func:`collect_image_timeline`."""
+    return collect_image_timeline(input_dirs, globs=TIFF_GLOBS)
 
 
 def to_uint8_rgb(
@@ -131,7 +179,7 @@ def to_uint8_rgb(
     p_high: float = 98.0,
 ) -> np.ndarray:
     """
-    Convert TIFF (possibly 16-bit/grayscale) to uint8 RGB.
+    Convert an image (PNG, TIFF, possibly 16-bit/grayscale) to uint8 RGB.
 
     Uses per-frame, luminance-aware percentile clipping (not a fixed global scale)
     before stretching to uint8 — reduces domination by hot/cold outliers so the plant
@@ -183,7 +231,7 @@ def resize_frame(frame: np.ndarray, max_width: int) -> np.ndarray:
 
 
 def load_processed_frame(image_path: Path, max_width: int) -> np.ndarray:
-    """Load one TIFF file and apply normalization + resizing."""
+    """Load one image file (TIFF/PNG) and apply normalization + resizing."""
     with Image.open(image_path) as img:
         frame = to_uint8_rgb(img)
     return resize_frame(frame, max_width=max_width)
@@ -196,8 +244,10 @@ def build_timelapse(
     frame_step: int,
     max_width: int,
     max_frames: int | None,
+    formats: Sequence[str] = ("tiff",),
 ) -> None:
-    files = collect_tiff_files(input_dirs)
+    globs = resolve_format_globs(formats)
+    files = collect_image_files(input_dirs, globs=globs)
     files = files[::frame_step]
     if max_frames is not None:
         files = files[:max_frames]
@@ -240,14 +290,21 @@ def build_timelapse(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create timelapse animation from timestamped TIFF images."
+        description="Create timelapse animation from timestamped image folders (TIFF/PNG)."
     )
     parser.add_argument(
         "--input-dirs",
         nargs="+",
         type=Path,
         default=DEFAULT_DIRS,
-        help="One or more directories containing TIFF timelapse images.",
+        help="One or more directories containing timelapse images (TIFF/PNG).",
+    )
+    parser.add_argument(
+        "--formats",
+        nargs="+",
+        choices=("tiff", "png"),
+        default=["tiff"],
+        help="Image formats to scan for (default: tiff). Pass e.g. 'png' or 'tiff png'.",
     )
     parser.add_argument(
         "--output",
@@ -295,6 +352,7 @@ def main() -> None:
         frame_step=args.frame_step,
         max_width=args.max_width,
         max_frames=args.max_frames,
+        formats=args.formats,
     )
 
 

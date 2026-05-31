@@ -274,6 +274,29 @@ def load_raman_dataset(
     spectra["Datetime"] = datetimes.values
     spectra.set_index("Datetime", inplace=True)
 
+    # Incomplete acquisitions often leave a truncated final row (fewer tab-separated
+    # fields than the header). Pandas pads missing cells with NaN, which later breaks
+    # polyfit / curve_fit. Drop any row with non-finite spectral values.
+    spectral_cols = [c for c in spectra.columns if c not in ("Scan Number", "Seconds")]
+    spec_mat = spectra[spectral_cols].to_numpy(dtype=float, copy=False)
+    row_ok = np.isfinite(spec_mat).all(axis=1)
+    n_bad = int((~row_ok).sum())
+    if n_bad:
+        log = logging.getLogger(__name__)
+        log.warning(
+            "Dropped %d Raman scan row(s) with NaN or Inf in spectral channels "
+            "(often a truncated final line while the spectrometer is still writing). "
+            "Source: %s",
+            n_bad,
+            file_path_str,
+        )
+        spectra = spectra.loc[row_ok]
+    if spectra.empty:
+        raise SchemaMismatchError(
+            "All Raman spectral rows contained non-finite values after filtering; "
+            "check raw file integrity."
+        )
+
     processing_cfg = config.get("sections", {}).get("processing", {})
     if "spectral_sg_window" in processing_cfg:
         adjusted = _validate_savgol(processing_cfg["spectral_sg_window"], len(wavenumbers))
@@ -288,7 +311,11 @@ def load_raman_dataset(
             metadata[key] = value
 
     warnings: List[str] = []
-    if len(datetimes.unique()) != len(datetimes):
+    if n_bad:
+        warnings.append(
+            f"Dropped {n_bad} incomplete spectral row(s) containing NaN or Inf."
+        )
+    if len(spectra.index.unique()) != len(spectra.index):
         warnings.append("Duplicate datetime entries detected in Raman data.")
 
     return RamanDataset(
