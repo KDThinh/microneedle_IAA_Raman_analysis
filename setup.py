@@ -17,7 +17,7 @@ setup(
     long_description_content_type="text/markdown",
     url="",
     package_dir={'swnt_iaa_analysis': 'swnt_iaa_analysis'},
-    packages=['swnt_iaa_analysis'] + 
+    packages=['swnt_iaa_analysis', 'plant_timelapse'] +
               [f'swnt_iaa_analysis.{pkg}' for pkg in ['analysis', 'core', 'io', 'visualization']],
     classifiers=[
         "Development Status :: 4 - Beta",

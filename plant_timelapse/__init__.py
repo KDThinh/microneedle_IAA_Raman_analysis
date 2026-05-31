@@ -1,16 +1,15 @@
-"""Nb timelapse helpers (segmentation, etc.).
+"""Plant timelapse image analysis (Sobel edge segmentation, growth metrics).
 
-Heavy dependencies (OpenCV) are loaded by ``plant_timelapse.segment_nb`` only when
-you import or run that submodule.
+Heavy dependencies (OpenCV) load when you import ``plant_timelapse.plant_contour_v3``.
 """
 
 
 def __getattr__(name: str):  # PEP 562
-    if name == "run_segmentation_pipeline":
-        from plant_timelapse.segment_nb import run_segmentation_pipeline
+    if name == "main":
+        from plant_timelapse.plant_contour_v3 import main
 
-        return run_segmentation_pipeline
+        return main
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["run_segmentation_pipeline"]
+__all__ = ["main"]
