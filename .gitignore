@@ -131,6 +131,7 @@ desktop.ini
 *.jpg
 *.jpeg
 *.svg
+*.npz
 
 # Temporary files
 *.tmp
