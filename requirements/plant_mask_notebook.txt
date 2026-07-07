@@ -1,0 +1,13 @@
+# Extra deps for plant_timelapse/notebooks/plant_mask_pipeline.ipynb
+# plantcv is installed separately with --no-deps (see setup script).
+ipykernel>=6.0
+scipy>=1.7,<1.16
+scikit-image>=0.20
+scikit-learn>=1.0
+dask>=2022.0
+dask-jobqueue>=0.8
+xarray>=2023.0
+statsmodels>=0.14
+altair>=5,<6
+flyr>=5
+nd2>=0.11
