@@ -1,0 +1,24 @@
+# Extra deps for the DeepLabCut keypoint env (plant base + apical-meristem detection).
+#
+# NOTE: torch/torchvision and deeplabcut[gui] are installed separately by
+# scripts/setup_keypoints_dlc.ps1 (PyTorch must come from the CUDA wheel index
+# BEFORE deeplabcut, so GPU support is picked up). DeepLabCut pins numpy<2 and
+# matplotlib<3.9, which is why this lives in its own env (.venv-dlc), separate
+# from the numpy-2.x plant-mask env.
+#
+# These are the extras our plant_timelapse.keypoints CLI needs on top of DLC.
+ipykernel>=6.0
+typer>=0.4
+tqdm>=4.60
+tifffile>=2023.7
+imageio-ffmpeg>=0.4
+
+# Pin the Qt binding for the DLC labeling GUI. deeplabcut[gui] pulls the newest
+# PySide6 (6.11.x as of 2026-07), whose bundled Qt DLLs fail to load on this
+# Windows/Anaconda-Python setup ("DLL load failed ... procedure could not be
+# found"). 6.7.3 is a stable LTS build that loads cleanly and is compatible with
+# napari 0.6.6 / napari-deeplabcut. Keep all four in lockstep at the same version.
+PySide6==6.7.3
+PySide6-Essentials==6.7.3
+PySide6-Addons==6.7.3
+shiboken6==6.7.3

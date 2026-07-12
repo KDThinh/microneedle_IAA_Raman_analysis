@@ -3,7 +3,7 @@
 Purpose of this file: let a **new Cursor chat on another machine** continue the work without the
 original chat history. Read this top-to-bottom, then continue from "Next steps".
 
-Last updated: 2026-07-07
+Last updated: 2026-07-08
 
 ---
 
@@ -76,24 +76,68 @@ zero-shot masks) as robust auxiliary metrics.
 4. Post-process predictions per timelapse with temporal smoothing + a monotonic-growth prior;
    flag low-confidence/occluded frames.
 
-## OPEN QUESTIONS to answer at home
-- [ ] **GPU**: user thinks the home laptop has an **NVIDIA GPU** — confirm (run `nvidia-smi`, or
-      check Device Manager → Display adapters). This decides DeepLabCut/SLEAP config (CUDA vs CPU).
-- [ ] **Tooling choice**: DeepLabCut/SLEAP (recommended) vs lightweight custom model.
+## RESOLVED decisions (2026-07-08)
+- **GPU**: confirmed **NVIDIA GeForce RTX 3070, 8 GB VRAM** (driver 596.08, CUDA 13.2 capable) via
+  `nvidia-smi`. CUDA training is a go on native Windows (PyTorch engine — no WSL needed).
+- **Tooling**: **DeepLabCut 3.x, PyTorch engine** (default). Supports Python 3.10–3.12; DLC pins
+  `numpy<2` + `matplotlib<3.9`, so it lives in a **dedicated env** (`.venv-dlc`), separate from the
+  numpy-2.x plant-mask `.venv`.
+- **Model input**: **raw grayscale** (12-bit → 8-bit via the *absolute* 0–4095 scaling, i.e.
+  `raw_u8`), **NOT** the binary/edge mask. The mask discards the intensity/texture/context cues the
+  model needs to infer the meristem under occlusion, and re-couples us to segmentation errors.
+- **Field of view**: a **single fixed crop = the plant-column `ROI (250,700,1750,2560)`**, identical
+  every frame. Not the full frame (wastes resolution) and NOT a per-frame mask bbox (unstable scale,
+  can crop out an occluded meristem). Height = base_y − meristem_y is a vertical pixel distance, so
+  the crop offset cancels.
+- **Retraining policy**: on each new dataset, run inference first and check DLC confidence + curve
+  smoothness. If it degrades, **fine-tune** with ~10–20 top-up labels (don't retrain from scratch).
+  Full retrain only if the rig/optics or species changes. Keep the crop + scaling FROZEN so old
+  labels/weights stay valid.
+- **Where the model is developed**: CLI-driven, not notebook-driven. Long training + the labeling
+  GUI run from the terminal (robust to kernel disconnects); a thin notebook is QC-only.
 
-## Next steps (start here in the new chat)
-1. Confirm GPU (`nvidia-smi`) and paste the result.
-2. Pick tooling (default: DeepLabCut).
-3. Set up the labeling project and select the frames to label from the 2 datasets.
-4. Label base + meristem, train, run leave-one-plant-out validation.
-5. Wire the trained keypoint predictor into Stage 3 of `plant_segmentation_v2.ipynb`, keeping
-   canopy height as the fallback metric.
+## Project structure (new)
+- `plant_timelapse/keypoints/` — version-controlled module + `typer` CLI:
+  - `config.py` (SENSOR_MAX, ROI, KEYPOINTS, dataset paths, DLC project layout),
+  - `frame_export.py` (absolute 8-bit + ROI crop → cropped mp4 / PNG),
+  - `frame_select.py` (timestamp parsing, day/night, even sampling),
+  - `postprocess.py` (DLC predictions → smoothed stem-height CSV),
+  - `cli.py` / `__main__.py` (orchestration).
+- `plant_timelapse/notebooks/keypoint_dlc_pipeline.ipynb` — QC only (kernel: `microneedle (dlc keypoints)`).
+- `plant_timelapse/dlc/` — GENERATED, gitignored: cropped videos, DLC project, weights, height CSVs.
+- `scripts/setup_keypoints_dlc.ps1` + `requirements/keypoints_dlc.txt` — one-time env setup.
+
+## CLI workflow (run from repo root, in the DLC env)
+```
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints gpu-check
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints build-videos      # cropped 8-bit mp4 per dataset
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints create-project    # bodyparts = base, meristem
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints extract           # kmeans picks diverse frames
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints label             # GUI: click base + meristem
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints check-labels
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints train
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints evaluate
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints analyze
+.venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints postprocess --monotonic
+```
+
+## Next steps (start here)
+1. Finish env install (`scripts/setup_keypoints_dlc.ps1`) and confirm `gpu-check` shows CUDA True.
+2. `build-videos` → `create-project` → `extract` → **label base + meristem** (~50 frames/dataset,
+   spread across growth + day/night, include occluded ones).
+3. `train` → `evaluate`; run **leave-one-plant-out** (train run4 → test run5 and vice versa).
+4. `analyze` → `postprocess`; QC in the notebook.
+5. Wire the predictor / height CSV into Stage 3 of the segmentation pipeline, keeping canopy height
+   as the fallback metric.
 
 ## Data locations
-- Timelapse frames (example dataset):
-  `H:\My Drive\...\Run 4\DEV_1AB22C05B465\timelapse_2026-05-07_12-56-08\*.tif`
-  (set `TIMELAPSE_DIR` in Stage 0 of the notebook; second dataset path TBD).
-- Outputs: `plant_timelapse/outputs/<timelapse_name>/`.
+- Dataset 1 (run4): `G:\My Drive\...\Run 4\DEV_1AB22C05B465\timelapse_2026-05-07_12-56-08\*.tif`
+  — **325 frames**, May 6–13 (~7 days), 2592×1944 uint16, range 61–4095.
+- Dataset 2 (run5): `G:\My Drive\...\Run 5\DEV_1AB22C05B465\timelapse_2026-05-16_16-16-30\*.tif`
+  — **995 frames**, May 16–Jun 6 (~21 days), 2592×1944 uint16, range 61–4095.
+  (Full paths are hard-coded in `plant_timelapse/keypoints/config.py::DATASETS`.)
+- Segmentation outputs: `plant_timelapse/outputs/<timelapse_name>/`.
+- Keypoint outputs: `plant_timelapse/dlc/` (gitignored).
 
 ## How this conversation was continued
 This file was written so the work survives moving between machines. On the new machine, open a

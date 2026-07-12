@@ -84,6 +84,7 @@ celerybeat-schedule
 # Environments
 .env
 .venv
+.venv-dlc
 env/
 venv/
 ENV/
@@ -142,3 +143,6 @@ tmp/
 # Log files
 *.log
 *.gif
+
+# DeepLabCut keypoint project (generated data + model weights + exported frames/videos)
+plant_timelapse/dlc/
