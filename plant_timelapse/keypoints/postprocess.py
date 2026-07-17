@@ -195,3 +195,106 @@ def build_height_table(
         out.insert(0, "timestamp", [ts[i] if 0 <= i < len(ts) else None for i in pos])
 
     return out.reset_index()
+
+
+def build_height_table_from_labels(
+    labeled_dir,
+    dataset_dir,
+    dataset: str,
+    step: int = 1,
+    base: str = "base",
+    meristem: str = "meristem",
+    smooth_window: int = 11,
+    interpolate_gaps: bool = True,
+    max_frame: Optional[int] = None,
+    exclude_frames: Optional[set[int]] = None,
+) -> pd.DataFrame:
+    """Stem-height table from manual DLC labels (no model predictions).
+
+    Uses ``frameXXX.png`` rows in ``CollectedData_*.csv`` aligned to video frame
+    index ``XXX``. Other filenames (e.g. ``img*.png`` from kmeans) are ignored for
+    the timeline but remain available for future training.
+
+    Returns one row per video frame (optionally truncated with ``max_frame``).
+    Unlabeled frames have NaN keypoints/heights. When ``interpolate_gaps`` is
+    True, gaps are linearly interpolated and Savitzky–Golay smoothing is applied.
+    """
+    import re
+
+    labeled_dir = Path(labeled_dir)
+    matches = sorted(labeled_dir.glob("CollectedData_*.csv"))
+    if not matches:
+        raise FileNotFoundError(f"No CollectedData_*.csv under {labeled_dir}")
+    lab = pd.read_csv(matches[0], header=[0, 1, 2], index_col=[0, 1, 2])
+
+    # Drop scorer level if present -> (bodypart, coord)
+    if isinstance(lab.columns, pd.MultiIndex) and lab.columns.nlevels == 3:
+        lab.columns = lab.columns.droplevel(0)
+
+    tiffs = list_tiffs(dataset_dir)[::step]
+    n = len(tiffs)
+    if max_frame is not None:
+        n = min(n, int(max_frame) + 1)
+    exclude = exclude_frames or set()
+
+    out = pd.DataFrame({"frame": np.arange(n)})
+    out["timestamp"] = [parse_timestamp(p) for p in tiffs[:n]]
+    for col in (
+        f"{base}_x",
+        f"{base}_y",
+        f"{meristem}_x",
+        f"{meristem}_y",
+    ):
+        out[col] = np.nan
+    out["labeled"] = False
+
+    frame_re = re.compile(r"^frame(\d+)\.png$", re.IGNORECASE)
+    for idx in lab.index:
+        fn = Path(str(idx[-1] if isinstance(idx, tuple) else idx)).name
+        m = frame_re.match(fn)
+        if not m:
+            continue
+        fi = int(m.group(1))
+        if not 0 <= fi < n or fi in exclude:
+            continue
+        row = lab.loc[[idx]].iloc[0]
+        try:
+            bx = float(row[(base, "x")])
+            by = float(row[(base, "y")])
+            mx = float(row[(meristem, "x")])
+            my = float(row[(meristem, "y")])
+        except Exception:
+            continue
+        if not all(np.isfinite(v) for v in (bx, by, mx, my)):
+            continue
+        out.loc[fi, f"{base}_x"] = bx
+        out.loc[fi, f"{base}_y"] = by
+        out.loc[fi, f"{meristem}_x"] = mx
+        out.loc[fi, f"{meristem}_y"] = my
+        out.loc[fi, "labeled"] = True
+
+    out["height_px"] = out[f"{base}_y"] - out[f"{meristem}_y"]
+    out["height_eucl_px"] = np.hypot(
+        out[f"{base}_x"] - out[f"{meristem}_x"],
+        out[f"{base}_y"] - out[f"{meristem}_y"],
+    )
+    out["height_valid"] = out["labeled"]
+
+    if interpolate_gaps:
+        for col in (
+            f"{base}_x",
+            f"{base}_y",
+            f"{meristem}_x",
+            f"{meristem}_y",
+            "height_px",
+            "height_eucl_px",
+        ):
+            out[f"{col}_interp"] = out[col].interpolate(limit_direction="both")
+        out["height_smooth"] = savgol_smooth(
+            out["height_px_interp"].ffill().bfill(), window=smooth_window
+        )
+        out["height_eucl_smooth"] = savgol_smooth(
+            out["height_eucl_px_interp"].ffill().bfill(), window=smooth_window
+        )
+
+    return out

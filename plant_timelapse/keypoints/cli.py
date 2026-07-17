@@ -87,9 +87,70 @@ def ensure_label_rows(labeled_dir: Path, dataset: str, filenames: list[str]) -> 
     )
     df = pd.concat([df, add_df])
     df = df[~df.index.duplicated(keep="first")].sort_index()
+    # Keep index names as None so CSV/H5 match DLC's run4/run5 format.
+    df.index = df.index.set_names([None, None, None])
     df.to_hdf(h5, key="df_with_missing", mode="w")
     df.to_csv(h5.with_suffix(".csv"))
     return len(to_add)
+
+
+def seed_first_frame_placeholders(labeled_dir: Path, dataset: str) -> bool:
+    """If CollectedData is entirely empty, seed frame000 with placeholder keypoints.
+
+    napari-deeplabcut crashes on click when every label is NaN
+    (``Keypoint(label=nan)``). One real (x, y) pair per bodypart initializes the
+    store; the user overwrites these on the first frame. Returns True if seeded.
+    """
+    import cv2
+    import numpy as np
+    import pandas as pd
+
+    h5 = labeled_dir / f"CollectedData_{C.EXPERIMENTER}.h5"
+    if not h5.exists():
+        return False
+    df = pd.read_hdf(h5)
+    if not bool(df.isna().all(axis=None)):
+        return False
+
+    # Prefer frame000.png; else first index entry
+    target = None
+    for idx in df.index:
+        fn = str(idx[-1] if isinstance(idx, tuple) else idx)
+        if fn == "frame000.png" or fn.endswith("frame000.png"):
+            target = idx
+            break
+    if target is None and len(df.index):
+        target = df.index[0]
+    if target is None:
+        return False
+
+    fn = str(target[-1] if isinstance(target, tuple) else target)
+    img_path = labeled_dir / Path(fn).name
+    img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        h, w = 2592, 1944
+    else:
+        h, w = img.shape[:2]
+
+    # Rough soil / tip placeholders (image coords: y down). User will correct.
+    base_x, base_y = float(w) * 0.5, float(h) * 0.85
+    mer_x, mer_y = float(w) * 0.5, float(h) * 0.45
+    cols = df.columns
+    # columns are (scorer, bodypart, coord) or (bodypart, coord)
+    def _set(bp: str, coord: str, val: float) -> None:
+        for c in cols:
+            if c[-2] == bp and c[-1] == coord:
+                df.loc[target, c] = val
+                return
+
+    _set("base", "x", base_x)
+    _set("base", "y", base_y)
+    _set("meristem", "x", mer_x)
+    _set("meristem", "y", mer_y)
+    df.index = df.index.set_names([None, None, None])
+    df.to_hdf(h5, key="df_with_missing", mode="w")
+    df.to_csv(h5.with_suffix(".csv"))
+    return True
 
 
 def _get_config(config: Optional[str]) -> Path:
@@ -238,6 +299,12 @@ def label(
     typer.echo("Label 'base' (stem at soil) and 'meristem' (growth tip).")
     typer.echo("When done: press Ctrl+S to save, then close the window.")
 
+    if seed_first_frame_placeholders(image_dir, image_dir.name):
+        typer.echo(
+            "(seeded placeholder keypoints on frame000 so napari can start; "
+            "overwrite them on the first frame.)"
+        )
+
     # --- Work around a napari hang when opening the folder ---------------------
     # viewer.open() spawns a napari `progress` object; the Qt activity dialog reacts
     # by building a progress-bar widget and calling QApplication.processEvents()
@@ -260,16 +327,23 @@ def label(
     viewer = napari.Viewer()
 
     def _startup():
-        viewer.window.add_plugin_dock_widget("napari-deeplabcut", "Keypoint controls")
-        # Open the image folder first. Passing [folder, config.yaml] in a single
-        # viewer.open() hangs on folders that do not yet have CollectedData_*.h5
-        # (run5 fresh labeling). run4 worked only because saved labels were already
-        # present and the folder reader picked them up without needing config in
-        # the same open() call.
-        viewer.open([str(image_dir)], plugin="napari-deeplabcut", stack=False)
-        has_points = any(getattr(layer, "name", "").startswith("CollectedData") for layer in viewer.layers)
-        if not has_points:
-            viewer.open([str(cfg)], plugin="napari-deeplabcut", stack=False)
+        try:
+            viewer.window.add_plugin_dock_widget("napari-deeplabcut", "Keypoint controls")
+            # Open the image folder only. Do NOT also open config.yaml here: with an
+            # existing CollectedData layer that second open can make napari exit
+            # immediately. Placeholder seeding (above) avoids the all-NaN keypoint crash.
+            viewer.open([str(image_dir)], plugin="napari-deeplabcut", stack=False)
+            has_points = any(
+                getattr(layer, "name", "").startswith("CollectedData") for layer in viewer.layers
+            )
+            if not has_points:
+                viewer.open([str(cfg)], plugin="napari-deeplabcut", stack=False)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            typer.echo("Label GUI startup failed; see traceback above.", err=True)
+            viewer.close()
 
     QTimer.singleShot(0, _startup)
     napari.run()
@@ -442,6 +516,50 @@ def postprocess_cmd(
         out_csv = C.DLC_DIR / f"stem_height_{name}.csv"
         table.to_csv(out_csv, index=False)
         typer.echo(f"[{name}] {pred.name} -> {out_csv}  ({len(table)} frames)")
+
+
+@app.command("height-from-labels")
+def height_from_labels(
+    dataset: str = typer.Argument(..., help="Dataset name (e.g. run5)."),
+    config: Optional[str] = typer.Option(None, help="Path to config.yaml (default: active project)."),
+    step: int = typer.Option(1, help="Same --step used in build-videos."),
+    smooth_window: int = typer.Option(11, help="Savitzky-Golay window (odd)."),
+    no_interpolate: bool = typer.Option(
+        False, help="Do not interpolate gaps between labeled frames."
+    ),
+    max_frame: Optional[int] = typer.Option(
+        None, help="Last video frame index to include (e.g. 899 drops tip-out-of-frame)."
+    ),
+):
+    """Build stem-height CSV from manual labels (no model / analyze needed).
+
+    Reads ``labeled-data/<dataset>/CollectedData_*.csv`` rows named
+    ``frameXXX.png`` and aligns them to the video timeline. Writes
+    ``stem_height_<dataset>_from_labels.csv``.
+    """
+    cfg = _get_config(config)
+    dataset_path = dict(C.DATASETS).get(dataset)
+    if dataset_path is None:
+        raise typer.BadParameter(f"Unknown dataset '{dataset}'.")
+    labeled_dir = cfg.parent / "labeled-data" / dataset
+    if not labeled_dir.is_dir():
+        raise typer.BadParameter(f"No labeled-data folder '{dataset}'.")
+
+    table = postprocess.build_height_table_from_labels(
+        labeled_dir,
+        dataset_dir=dataset_path,
+        dataset=dataset,
+        step=step,
+        smooth_window=smooth_window,
+        interpolate_gaps=not no_interpolate,
+        max_frame=max_frame,
+    )
+    out_csv = C.DLC_DIR / f"stem_height_{dataset}_from_labels.csv"
+    table.to_csv(out_csv, index=False)
+    n_lab = int(table["labeled"].sum()) if "labeled" in table.columns else 0
+    typer.echo(
+        f"[{dataset}] labels -> {out_csv}  ({len(table)} video frames, {n_lab} labeled)"
+    )
 
 
 def _find_prediction(proj_dir: Path, dataset_name: str) -> Optional[Path]:

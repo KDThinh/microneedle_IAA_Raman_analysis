@@ -34,6 +34,10 @@ LIGHT_OFF_HOUR = 22
 DATASETS = OrderedDict(
     [
         (
+            "run2",
+            r"G:\My Drive\Work\DiSTAP\Research\Auxin IAA\IAA-MN longitudinal\IAA Nanosensor Experiment\In planta\Nb\Treatment_Drought\Light_6to22\Temp_Hum_Variable\Run 2\Raw data\Time-lapse images\timelapse_2026-02-09_16-44-08",
+        ),
+        (
             "run4",
             r"G:\My Drive\Work\DiSTAP\Research\Auxin IAA\IAA-MN longitudinal\IAA Nanosensor Experiment\In planta\Nb\Treatment_Control\Light_6to22\Temp_Hum_Variable\Run 4\DEV_1AB22C05B465\timelapse_2026-05-07_12-56-08",
         ),

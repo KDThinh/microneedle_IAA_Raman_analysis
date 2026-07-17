@@ -1,150 +1,131 @@
 # Handoff — Run 5 stem-height optimization (DLC keypoints)
 
-Last updated: 2026-07-13
+Last updated: 2026-07-13 (evening)
 
 ## Goal
 
-Get reliable **stem height = base_y − meristem_y** for run 5 (NIR timelapse, ~995 frames, ~21 days) using the DeepLabCut keypoint pipeline (`base` + `meristem`), matching the quality already achieved for run 4.
+Get reliable stem height for run 5 (NIR timelapse, ~995 frames, ~21 days) using DeepLabCut keypoints (`base` + `meristem`).
+
+**Preferred metric when plant tilts:** Euclidean distance  
+`height_eucl = hypot(base_x − meristem_x, base_y − meristem_y)`  
+(`height_eucl_px` / `height_eucl_smooth` in the CSV). Vertical `base_y − meristem_y` underestimates leaning stems and can go negative when keypoints are wrong.
 
 ## Context / starting point
 
-- Pipeline module: `plant_timelapse/keypoints/` (CLI-driven).
+- Pipeline: `plant_timelapse/keypoints/` (CLI-driven).
 - Imaging: full frame (`ROI = None`), absolute 8-bit scaling 0–4095.
-- Datasets in `keypoints/config.py`: `run4` (~325 frames, ~7 days), `run5` (~995 frames, ~21 days).
-- Run 4 worked via: kmeans labels + **targeted top-up labels** + postprocess (likelihood floors → interpolate → destep → smooth).
-- Run 5 is harder: longer series, plant bolts, meristem travels ~5× more vertically; apical tip often near top of frame.
+- Datasets: `run4` (~325 frames, ~7 days), `run5` (~995 frames, ~21 days).
+- Run 4 is good (labels + top-ups + postprocess).
+- Run 5 is harder: longer series, bolting, large meristem travel, tilt late in growth.
 
-## What was done for run 5 (chronological)
+## What was done (chronological)
 
-### 1. Initial state
+### 1–3. Early rounds + snapshot traps
 
-- ~50 kmeans-extracted labels for run 5 (`labeled-data/run5/`, 49 filled; `img360` empty).
-- Combined train with run 4; analyze + postprocess produced a poor run 5 curve.
-- Diagnosis: model saturates on tall plants (meristem stuck ~y1850), base drifts off soil, height goes negative; destep can fake a smooth wrong curve.
+- Started with ~50 kmeans labels; model failed on tall plants (meristem stuck mid-frame, base off soil).
+- First top-up labeling; discovered `postprocess` can pick the wrong `.h5` alphabetically; floors 0.6 can blank all frames → Savitzky–Golay NaN crash.
+- Never trust `snapshotindex: -1` / “best” without checking.
 
-### 2. First top-up labeling (2026-07-12)
+### 4–5. Shuffle bug
 
-- Exported additional frames via `add-label-frames run5 --frames ...` (even spacing through mid/late growth + worst prediction failures).
-- Labeled in napari (`label --dataset run5`); napari hang fixed with `python -m napari --reset` when needed.
-- Then: `check-labels` → `train` → `evaluate` → `analyze --dataset run5`.
+- Each `create_training_dataset` creates a **new shuffle**. Default CLI train/analyze uses **shuffle=1** (old weights).
+- Must train/analyze with the **newest shuffle** explicitly.
 
-### 3. Snapshot / postprocess issues discovered
+### 6. Shuffle4 (labels after second top-up)
 
-- DLC “best” snapshot was **epoch 40** (`snapshot_best-40`): very low confidence (base/mer medians ~0.15 / 0.09).
-- `postprocess` auto-picks last alphabetical `*filtered.h5`, which preferred `best-40` over older `best-120` → all frames blanked at floor 0.6 → Savitzky–Golay crash (`array must not contain infs or NaNs`).
-- Workaround: move stale preds aside so postprocess picks the intended file.
-- Explicit late-snapshot analyze on **shuffle1** `snapshot_index=4` (epoch 200) still not usable (~0.4% `height_valid` at floors 0.6; impossible heights).
+- Trained shuffle4 to epoch 200.
+- Snap-200 better than snap-150, but still not usable (meristem ≥0.6 ≈ 0%; many negative vertical heights).
+- Postprocess floors **0.3** required for QC (0.6 blanks everything).
 
-### 4. Second top-up labeling (2026-07-12 evening)
+### 7. Third top-up + shuffle5 (2026-07-13)
 
-- Exported **52 more frames** into `labeled-data/run5` (failure-focused, mid/late heavy).
-- Labeled in napari; `check-labels` reported ~59 run4 + ~154 run5 label images.
-- Run5 labels after this round: **~146 filled / 154 rows**.
+- Another ~51 meristem-focused labels; run5 filled labels grew to ~193 then ~205 rows after labeling.
+- Trained **shuffle=5**, epochs 200. Snapshots: 100/125/150/175/200 + `best-090`.
+- Analyzed `shuffle=5, snapshot_index=4` (snapshot-200) → `...shuffle5_snapshot_200.h5`.
+- Postprocess floors 0.3 → `stem_height_run5.csv`.
 
-### 5. Critical bug: `train` kept using shuffle1
+### 8. Shuffle5 notebook QC (confirmed run5)
 
-- Each `create_training_dataset` / `train` cycle creates a **new shuffle** (shuffle1 → … → **shuffle4**).
-- New labels landed in **shuffle4** documentation (~191 frames in training doc).
-- Default CLI `train` / `analyze` use **shuffle=1**, whose `snapshot-100…200.pt` were still dated **2026-07-08**.
-- Only `snapshot-best-040.pt` on shuffle1 was updated by a later train — late-epoch analyze with shuffle1 therefore re-inferred the **old** model (predictions matched prior aside file almost exactly).
+Stem-height plot + keypoint contribution plots showed:
 
-### 6. Train + analyze shuffle4 (2026-07-12 night → 2026-07-13)
+| Check | Result |
+|-------|--------|
+| Vertical height | Often **negative**; smooth collapses late |
+| Euclidean height | Mostly positive; late rise more plausible, but still huge jumps |
+| Base/meristem confidence | Low (base ~0.2–0.4, meristem ~0.2–0.6) |
+| Raw `base_y` jumps | mean **246** / max **2113** px |
+| Raw `meristem_y` jumps | mean **230** / max **1717** px |
+| `height_valid` | ~23% at floors 0.3 |
+| Suspicious frames | **376** flagged — do **not** label all |
 
-- Trained explicitly: `deeplabcut.train_network(cfg, shuffle=4, epochs=200)`.
-- Shuffle4 snapshots (all fresh):
+**Verdict:** shuffle5 snap-200 still **not usable**. Destep makes refined curves look smooth but invents continuity. Prefer Euclidean for QC; fix keypoints (especially **base on soil**) before trusting any curve.
 
-| index | file |
-|------:|------|
-| 0 | snapshot-100.pt |
-| 1 | snapshot-125.pt |
-| 2 | snapshot-150.pt |
-| 3 | snapshot-175.pt |
-| **4** | **snapshot-200.pt** |
-| 5 / −1 | snapshot-best-050.pt |
+### 9. Shuffle6 + snap-175 (2026-07-13 evening)
 
-- Analyzed run5 with `shuffle=4, snapshot_index=4` → `...shuffle4_snapshot_200.h5`.
-- Postprocess at floors **0.6** crashed again (meristem ≥0.6 = **0%** → all NaN).
-- Postprocess at floors **0.3** succeeded.
-
-### 7. Shuffle4 snapshot comparison (CSV QC)
-
-| Metric | shuffle4 snap-200 (floors 0.3) | shuffle4 snap-150 (floors 0.3) |
-|--------|--------------------------------|--------------------------------|
-| `height_valid` | **23.5%** | **14.6%** |
-| Meristem ≥ 0.6 | **0%** | **0%** |
-| Meristem ≥ 0.3 | ~40% | ~24% |
-| Negative heights | ~19% | ~29% |
-| Height median | ~330 px | ~6.5 px |
-| Smooth first→last | ~732 → ~1395 (rises) | ~906 → ~46 (**falls**) |
-
-**Verdict:** snap-150 is **worse** than snap-200. Snap-200 is the better shuffle4 checkpoint so far, but still **not usable** as a final growth curve (meristem confidence too low; many negative heights; tall-phase base often off soil).
+- After another curated top-up (~53 frames) → train **shuffle=6**; eval favored mid/late epochs over final 200.
+- Analyzed `shuffle=6, snapshot_index=3` (**snapshot-175**).
+- CSV-level: **first biologically plausible run5 curve** — no negative vertical heights; smooth ~275→1728 (vertical) / ~1933 (euclidean); early base_ok ~98%; meristem y 1985→346.
+- Notebook QC still shows **staircase jumps**, Euclidean spikes, low confidence (~0.1–0.5), gappy refined series; **303** frames flagged.
+- **Verdict:** clear progress, not shippable yet. One more **targeted** top-up on jump clusters (esp. ~700–870 mid drop, ~920–950 late jump) is worthwhile; do **not** label all 303/380 neighbors.
 
 ## Decisions / lessons learned
 
-1. **Always pass `shuffle=`** to train/analyze after re-creating the training dataset — or you evaluate the wrong weights.
-2. **Never trust `snapshotindex: -1` / “best”** without checking — best-40 / best-050 have been weak.
-3. **`postprocess` file picker is fragile** — aside stale `run5DLC_*` preds; confirm the printed `.h5` name.
-4. **If analyze finishes instantly**, DLC skipped because `*_full.pickle` exists — move aside and re-run.
-5. **Floors 0.6 are too strict** for current run5 models — use ~0.3 (or none) for QC; do not trust a destepped smooth curve when valid fraction is low.
-6. **Snapshot-hopping is secondary** to more/better labels once late epochs are already weak.
-7. Notebook QC: set `DATASET = 'run5'` and re-run stem-height cells; confirm plot title says run5.
+1. Always pass **`shuffle=`** to train/analyze after recreating the training dataset.
+2. Never trust **best / −1** without checking metrics; prefer snapshot by eval (e.g. 175 over 200 when 200 degrades).
+3. Aside stale `run5DLC_*` preds; confirm printed `.h5` name.
+4. Instant analyze = DLC skip (existing pickle) — move aside and re-run.
+5. Floors **0.6** too strict for current run5 models → use **0.3** for QC.
+6. Do **not** label hundreds of suspicious neighbors; thin to ~40–60 targeted frames.
+7. For tilted plants, report **`height_eucl_*`**; vertical is secondary.
+8. Destep/smooth are for mild noise only — not a substitute for good labels.
+9. Labeling still helps when the trend is right but jumps remain — focus on failure clusters.
 
 ## Current artifacts
 
-| Item | Location / note |
-|------|------------------|
-| Labels | `plant_timelapse/dlc/plant_meristem-ryank-2026-07-08/labeled-data/run5/` (~146 filled) |
-| Best shuffle4 weights so far | `.../trainset95shuffle4/train/snapshot-200.pt` |
-| Active preds (last postprocess) | `videos_prepared/run5DLC_...shuffle4_snapshot_150.h5` (worse; for comparison only) |
-| Prefer for reference | re-postprocess from aside / re-analyze **shuffle4 snapshot_200** |
-| Aside folders | `_aside_best40/`, `_aside_old_preds/`, `_aside_old_snapshot200/`, `_aside_before_round2/`, `_aside_snapshot_tests/`, `_aside_pre_shuffle4/` |
-| Height CSV | `plant_timelapse/dlc/stem_height_run5.csv` (currently from **snap-150**; poor) |
+| Item | Note |
+|------|------|
+| Labels | `labeled-data/run5/` (~258 rows before next top-up export) |
+| Latest weights | `...trainset95shuffle6/train/snapshot-175.pt` (preferred) |
+| Active preds | `videos_prepared/run5DLC_...shuffle6_snapshot_175.h5` |
+| Height CSV | `stem_height_run5.csv` (shuffle6/175; improved but jumpy) |
+| Aside folders | `_aside_*` under `videos_prepared/` |
 | Run 4 reference | `stem_height_run4.csv` (good) |
 
-## Next steps
+## Next steps (in progress)
 
-1. Optional: try **shuffle4 snapshot-175** (`snapshot_index=3`) once — last snapshot check before more labeling.
-2. If 175 is also weak: **stop snapshot-hopping**; do another **meristem-focused label round** (frames ~600–995; tip near top of frame) + keep base on soil mid/late.
-3. After labeling: `check-labels` → train with **`shuffle=` set to the newest shuffle** (or recreate dataset carefully) → analyze with explicit late snapshot (not −1).
-4. Aside old preds → postprocess with floors **0.3** for QC → notebook `DATASET = 'run5'`.
-5. Longer-term: CLI should expose `--shuffle` and `--snapshot-index`; consider run5-heavy fine-tune / larger training crop so base+meristem fit together on tall plants.
+1. **Curated label round (~54 frames)** on staircase/jump clusters — not the full 303.
+2. `label --dataset run5` → `check-labels`
+3. `create_training_dataset` + `train_network(shuffle=7)` (expect **7**)
+4. Analyze preferred late snapshot by eval (not blindly −1) → postprocess floors 0.3 → QC **`height_eucl_smooth`**
+5. Longer-term: CLI `--shuffle` / `--snapshot-index`; optional larger training crop
 
 ## Useful commands
 
 ```powershell
-# Top-up frames then label
+# Label
 .venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints add-label-frames run5 --frames <list>
 .venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints label --dataset run5
 .venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints check-labels
 
-# Train newest shuffle (example: shuffle 4 — bump if a new shuffle was created)
+# Train newest shuffle (example: 7 after next create_training_dataset)
 .venv-dlc\Scripts\python.exe -c @"
 import deeplabcut
 from plant_timelapse.keypoints import config as C
 cfg = C.POINTER_FILE.read_text(encoding='utf-8').strip()
-deeplabcut.train_network(cfg, shuffle=4, epochs=200)
+deeplabcut.create_training_dataset(cfg, net_type=C.DEFAULT_NET_TYPE)
+deeplabcut.train_network(cfg, shuffle=7, epochs=200)
 "@
 
-# List snapshot indices for a shuffle
-.venv-dlc\Scripts\python.exe -c @"
-from pathlib import Path
-from deeplabcut.pose_estimation_pytorch.apis.utils import get_model_snapshots
-from deeplabcut.pose_estimation_pytorch.task import Task
-folder = Path(r'plant_timelapse/dlc/plant_meristem-ryank-2026-07-08/dlc-models-pytorch/iteration-0/plant_meristemJul8-trainset95shuffle4/train')
-for i, s in enumerate(get_model_snapshots('all', folder, Task.BOTTOM_UP)):
-    print(f'{i}: {s.path.name}')
-"@
-
-# Analyze specific shuffle + snapshot (move aside old run5DLC_* first if re-running)
+# Analyze (adjust shuffle + snapshot_index after listing snapshots)
 .venv-dlc\Scripts\python.exe -c @"
 import deeplabcut
 from plant_timelapse.keypoints import config as C
 cfg = C.POINTER_FILE.read_text(encoding='utf-8').strip()
 videos = [str(C.video_path('run5'))]
-deeplabcut.analyze_videos(cfg, videos, shuffle=4, save_as_csv=True, snapshot_index=4)
+deeplabcut.analyze_videos(cfg, videos, shuffle=7, save_as_csv=True, snapshot_index=3)
 "@
 
-# Postprocess for QC (0.3 floors — 0.6 often blanks everything on run5)
+# Postprocess QC
 .venv-dlc\Scripts\python.exe -m plant_timelapse.keypoints postprocess --dataset run5 `
   --base-likelihood-floor 0.3 --meristem-likelihood-floor 0.3 `
   --interpolate-limit 3 --destep-jump-px 15
@@ -152,4 +133,4 @@ deeplabcut.analyze_videos(cfg, videos, shuffle=4, save_as_csv=True, snapshot_ind
 
 ## Related docs
 
-- `plant_timelapse/HANDOFF_stem_height.md` — original stem-height / DLC project handoff (broader than this run5 optimization log).
+- `plant_timelapse/HANDOFF_stem_height.md` — broader stem-height / DLC project handoff.

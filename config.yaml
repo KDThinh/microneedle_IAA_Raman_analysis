@@ -345,6 +345,32 @@ profiles:
       fft_als_p: 0.01
     outputs:
       timeseries_x_axis: datetime
+  Nb_Control_6to22_Temp_Hum_Variable_Run5:
+    description: Nb Control treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable
+      - uncontrolled but recorded), Run 5, done at DiSTAP
+    inherits: processing_default
+    data_source:
+      raman_relative_path: IAA Nanosensor Experiment/In planta/Nb/Treatment_Control/Light_6to22/Temp_Hum_Variable/Run
+        5/Raman data/run 1_1.txt
+    metadata:
+      experiment: in planta
+      plant_type: Nb
+      treatment: Control
+      temp_hum_control: false
+      light_cycle: 6to22
+      replicate_number: 5
+    processing:
+      timeseries_smoothing_method: savitzky
+      timeseries_sg_window: 5
+      timeseries_sg_poly_order: 2
+      spike_window: 5
+      spike_threshold: 10.0
+      baseline_correction_threshold: 4
+      baseline_correction_window: 15
+      fft_gaussian_sigma: 30
+      fft_als_p: 0.01
+    outputs:
+      timeseries_x_axis: datetime
   # -------------------------------------------------------------------------
   Nb_Drought_6to22_Temp_Hum_Variable_Run1:
     description: Nb Drought treatment, 6to22 light cycle, variable temp/humidity (Temp_Hum_Variable
