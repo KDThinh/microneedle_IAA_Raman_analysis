@@ -770,12 +770,22 @@ def plot_processing_stages(df_original, df_after_spikes, df_corrected, output_di
     svg_dir = Path(output_dir) / "svg"
     svg_dir.mkdir(parents=True, exist_ok=True)
 
-    # Columns to plot
-    columns_to_plot = [
+    # Columns to plot: follow whichever space the baseline correction produced, so the
+    # plotted "Baseline Corrected" curve matches the channels the ratio is built from.
+    raw_columns = [
+        'Raw_Fluorescence_Intensity',
+        'Raw_Gband_Area',
+        'Raw_Raman_Peak_850_Area'
+    ]
+    normalized_columns = [
         'Normalized_Fluorescence_Intensity',
         'Normalized_Gband_Area',
         'Normalized_Raman_Peak_850_Area'
     ]
+    if any((col + '_BaselineCorrected') in df_corrected.columns for col in raw_columns):
+        columns_to_plot = raw_columns
+    else:
+        columns_to_plot = normalized_columns
 
     # Get smoothing parameters for time-series smoothing
     processing_cfg = config.get('processing', {}) or config.get('sections', {}).get('processing', {})

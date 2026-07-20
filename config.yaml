@@ -22,13 +22,43 @@ profiles:
       timeseries_sg_poly_order: 2
       timeseries_gaussian_sigma: 10
 
-      # Spike removal (Hampel filter settings)
-      spike_window: 3
+      # Spike removal (Hampel filter settings). Used by transition_stitch despiking.
+      spike_window: 5
       spike_threshold: 3.0
       spike_min_length: 1
       spike_max_length: 20
 
-      # Baseline jump detection and correction
+      # Baseline correction method:
+      #   'transition_stitch' (default) - remove transition steps + drift, keep daily biology
+      #   'transition_ramp'             - reconstruct as slow component (removes sub-daily variation)
+      #   'jump_stitch'                 - legacy MAD-based jump correction
+      baseline_correction_method: transition_stitch
+
+      # Transition detection (shared by transition_stitch and transition_ramp).
+      # Expressed in TIME and as a FRACTION OF SIGNAL LEVEL so one setting ports across runs
+      # with different sampling intervals (1-5 min) and different signal magnitudes.
+      transition_slope_halfwindow_minutes: 25  # local-slope half-window, in minutes
+      transition_candidate_sigma: 6            # candidate slope threshold, in MAD units
+      transition_min_displacement_pct: 0.03    # min net step, as a fraction of median level
+      transition_min_rate_pct_per_hour: 0.05   # min sustained rate, as a fraction of level per hour
+      # Optional absolute overrides (per profile). If set, they win over the relative values:
+      #   transition_slope_halfwindow_scans, transition_min_displacement, transition_min_rate_per_scan
+
+      # transition_stitch reconstruction (the default method)
+      # stitch_space: which channels to correct.
+      #   'raw'        - correct the raw (un-normalized) channels. The per-scan background
+      #                  has its own day/night pattern; correcting in normalized space breaks
+      #                  its cancellation and injects a daytime artifact into the ratio.
+      #                  The resulting ratio is exactly scale-invariant across datasets.
+      #   'normalized' - correct the normalized channels (previous behaviour).
+      stitch_space: raw
+      stitch_drift_window_hours: 24          # window for removing the accumulated stitch drift
+      denominator_smooth_scans: 7            # light median smoothing of the G-band/850 denominator
+
+      # transition_ramp reconstruction (slow-component method)
+      slow_window_hours: 8                    # slow-component window
+
+      # Legacy jump-stitch baseline (used only when baseline_correction_method: jump_stitch)
       baseline_correction_threshold: 5
       baseline_correction_window: 15
       baseline_detect_cumulative_jumps: true
@@ -175,8 +205,6 @@ profiles:
       replicate_number: 1
     processing:
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       baseline_correction_threshold: 15
       baseline_correction_window: 20
       baseline_detect_cumulative_jumps: false
@@ -190,6 +218,10 @@ profiles:
       raman_relative_path: IAA Nanosensor Experiment/In planta/Bok Choy/Treatment_Control/Light_6to22/Temp_Hum_Variable/Run
         2/Raw data/combined_raman_data.txt
       temp_relative_path: IAA Nanosensor Experiment/In planta/Temperature and humidity/Indoor_thermometer.csv
+    baseline_events:
+    - datetime: '2025-06-07 01:57:00'
+      description: step in fluorescence and G-band (background +47%, G-band -24%) - refocus
+        or sample movement, not a lighting transition
     metadata:
       experiment: in planta
       plant_type: Bok Choy
@@ -199,8 +231,6 @@ profiles:
       replicate_number: 2
     processing:
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       baseline_correction_threshold: 8
       baseline_correction_window: 100
       fft_als_p: 0.001
@@ -231,8 +261,6 @@ profiles:
       marker_style: dotted
     processing:
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       baseline_correction_threshold: 10
       baseline_correction_window: 50
       fft_als_p: 0.0005
@@ -263,8 +291,6 @@ profiles:
       replicate_number: 1
     processing:
       timeseries_smoothing_method: savitzky #or gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       baseline_correction_threshold: 5
       fft_als_p: 0.0005
     outputs:
@@ -310,8 +336,6 @@ profiles:
       timeseries_smoothing_method: savitzky
       timeseries_sg_window: 5
       timeseries_sg_poly_order: 2
-      spike_window: 7
-      spike_threshold: 5.0
       baseline_correction_threshold: 5
       baseline_correction_window: 10
       fft_gaussian_sigma: 30
@@ -324,7 +348,7 @@ profiles:
     inherits: processing_default
     data_source:
       raman_relative_path: IAA Nanosensor Experiment/In planta/Nb/Treatment_Control/Light_6to22/Temp_Hum_Variable/Run
-        4_1/Raw data/run 11/run 11.txt
+        4/Raman data/run 11/run 11.txt
     metadata:
       experiment: in planta
       plant_type: Nb
@@ -337,8 +361,14 @@ profiles:
       timeseries_smoothing_method: savitzky
       timeseries_sg_window: 5
       timeseries_sg_poly_order: 2
-      spike_window: 5
-      spike_threshold: 10.0
+      # Tuning: this run's PL is essentially flat - 6% daily amplitude and at most a 2.2%
+      # hour-to-hour change (Run 5, for contrast: 34% and 15%). There are no lighting steps
+      # to remove, and the correction is already a no-op here (residual 9.93%, identical to
+      # uncorrected). Loosening the gate only invents regions and makes it worse
+      # (sigma 4 -> 10.21%). Held deliberately conservative so a future change to the global
+      # default cannot start over-correcting this run. The residual that remains is the
+      # data's own variability, not a lighting artifact.
+      transition_candidate_sigma: 8
       baseline_correction_threshold: 4
       baseline_correction_window: 5
       fft_gaussian_sigma: 30
@@ -363,8 +393,6 @@ profiles:
       timeseries_smoothing_method: savitzky
       timeseries_sg_window: 5
       timeseries_sg_poly_order: 2
-      spike_window: 5
-      spike_threshold: 10.0
       baseline_correction_threshold: 4
       baseline_correction_window: 15
       fft_gaussian_sigma: 30
@@ -401,8 +429,6 @@ profiles:
       timeseries_smoothing_method: savitzky #or gaussian
       timeseries_sg_window: 5
       timeseries_sg_poly_order: 2
-      spike_window: 5
-      spike_threshold: 10.0
       baseline_correction_threshold: 5
       baseline_correction_window: 10
       fft_gaussian_sigma: 30
@@ -424,8 +450,6 @@ profiles:
       light_cycle: 6to22
       replicate_number: 2
     processing:
-      spike_window: 5
-      spike_threshold: 10.0
       baseline_correction_threshold: 6
       baseline_correction_window: 10
       fft_gaussian_sigma: 20
@@ -459,8 +483,6 @@ profiles:
       replicate_number: 1
     processing:
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
       skip_scans_after: 1000
@@ -483,8 +505,6 @@ profiles:
     processing:
       recorded_excitation_nm: 835
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
       skip_scans_after: 3000
@@ -528,8 +548,6 @@ profiles:
       timeseries_x_axis: datetime
     processing:
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
   Nb_Control_Constant_Temp_Hum_Const_Run2:
@@ -553,8 +571,6 @@ profiles:
     processing:
       recorded_excitation_nm: 835
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
     outputs:
@@ -580,8 +596,6 @@ profiles:
     processing:
       recorded_excitation_nm: 835
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
     outputs:
@@ -608,8 +622,6 @@ profiles:
       timeseries_x_axis: datetime
     processing:
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
   Nb_Control_Constant_Temp_Hum_Const_Run5:
@@ -634,8 +646,6 @@ profiles:
       timeseries_x_axis: datetime
     processing:
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
   Nb_Control_Constant_Temp_Hum_Variable_Run1:
@@ -657,10 +667,16 @@ profiles:
       timeseries_x_axis: datetime
     processing:
       timeseries_smoothing_method: gaussian
-      spike_window: 5
-      spike_threshold: 10.0
       fft_gaussian_sigma: 30
       fft_als_p: 0.01
+      # Tuning: this run shows recurring ~07:30 / ~19:30 steps that the default candidate
+      # gate was too strict to admit, leaving visible square-wave drops. Loosening the gate
+      # raises detection 2.4 -> ~4/day and cuts the residual step from 8.2% to ~4.5% of level.
+      # (min_displacement_pct / min_rate are NOT the binding constraint here - sweeping them
+      # changed nothing; the candidate sigma gate was.)
+      transition_candidate_sigma: 3
+      transition_min_displacement_pct: 0.02
+      transition_min_rate_pct_per_hour: 0.03
 
   # ============================================================================
   # IN PLANTA PROFILES - NB SHADE (8to24, Temp/Hum controlled)

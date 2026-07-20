@@ -389,14 +389,7 @@ def correct_baseline_shifts(signal, threshold_multiplier=5, window_size=5,
     
     cumulative_offset = 0.0
     jump_info = []
-    
-    # #region agent log
-    _log_path = Path(__file__).parent.parent.parent / '.cursor' / 'debug.log'
-    _log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(_log_path, 'a') as f:
-        f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H1,H2", "location": f"{__file__}:379", "message": "correct_baseline_shifts: starting correction loop", "data": {"num_jumps": len(clean_indices), "correct_smoothed": correct_smoothed, "signal_len": len(signal), "y_corrected_initial": y_corrected[:5].tolist() if len(y_corrected) >= 5 else y_corrected.tolist()}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
-    # #endregion
-    
+
     # Iterate through the detected jumps and "stitch" the segments
     # Calculate all offsets from original signal first, then apply corrections cumulatively
     for idx in clean_indices:
@@ -427,12 +420,7 @@ def correct_baseline_shifts(signal, threshold_multiplier=5, window_size=5,
         
         # The jump magnitude (calculated from original target signal)
         step_change = val_after - val_before
-        
-        # #region agent log
-        _log_path = Path(__file__).parent.parent.parent / '.cursor' / 'debug.log'
-        _y_before_corr = y_corrected[idx:min(idx+3, len(y_corrected))].copy() if len(y_corrected) > idx else []
-        # #endregion
-        
+
         # We accumulate this offset
         cumulative_offset += step_change
         
@@ -441,13 +429,7 @@ def correct_baseline_shifts(signal, threshold_multiplier=5, window_size=5,
         # First apply a hard step correction starting at the adjusted jump index `idx`.
         # This makes the baseline continuous in an average sense.
         y_corrected[idx:] -= step_change
-        
-        # #region agent log
-        _y_after_corr = y_corrected[idx:min(idx+3, len(y_corrected))].copy() if len(y_corrected) > idx else []
-        with open(_log_path, 'a') as f:
-            f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H2", "location": f"{__file__}:428", "message": "correct_baseline_shifts: applied correction", "data": {"jump_idx": int(idx), "val_before": float(val_before), "val_after": float(val_after), "step_change": float(step_change), "y_before_corr": _y_before_corr.tolist() if hasattr(_y_before_corr, 'tolist') else _y_before_corr, "y_after_corr": _y_after_corr.tolist() if hasattr(_y_after_corr, 'tolist') else _y_after_corr, "correction_applied": not np.allclose(_y_before_corr, _y_after_corr, atol=1e-10) if len(_y_before_corr) > 0 and len(_y_after_corr) > 0 else False}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
-        # #endregion
-        
+
         jump_info.append({
             'index': idx,
             'val_before': val_before,
@@ -456,15 +438,7 @@ def correct_baseline_shifts(signal, threshold_multiplier=5, window_size=5,
             'cumulative_offset': cumulative_offset,
             'jump_type': jump_type_map.get(idx, 'unknown')
         })
-    
-    # #region agent log
-    _log_path = Path(__file__).parent.parent.parent / '.cursor' / 'debug.log'
-    _max_diff = np.nanmax(np.abs(y_corrected - target_signal)) if len(y_corrected) == len(target_signal) else -1
-    _are_identical = np.allclose(y_corrected, target_signal, atol=1e-10) if len(y_corrected) == len(target_signal) else False
-    with open(_log_path, 'a') as f:
-        f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H1", "location": f"{__file__}:445", "message": "correct_baseline_shifts: returning corrected signal", "data": {"num_jumps": len(clean_indices), "max_diff_target_vs_corrected": float(_max_diff), "are_identical": bool(_are_identical), "y_corrected_sample": y_corrected[:5].tolist() if len(y_corrected) >= 5 else y_corrected.tolist(), "target_sample": target_signal[:5].tolist() if len(target_signal) >= 5 else target_signal.tolist()}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
-    # #endregion
-    
+
     # Optional: local Gaussian smoothing around each jump to reduce residual kinks
     try:
         from scipy.ndimage import gaussian_filter1d
@@ -672,6 +646,68 @@ def parse_shade_transition_config(config):
         result['r_fr_ratio'] = shade_transition['r_fr_ratio']
     
     return result
+
+
+def parse_baseline_events_config(config):
+    """
+    Parse declared baseline step events (refocus, sample movement, sensor re-seat).
+
+    These are one-off events that shift the measured level permanently. They are declared
+    explicitly rather than detected, because separating a permanent shift from a daily
+    lighting transition automatically proved unreliable on trending data.
+
+    Expected config shape::
+
+        baseline_events:
+          - datetime: '2025-06-07 01:57:00'
+            description: refocus after sample check
+            mode: multiplicative      # optional; 'multiplicative' (default) or 'additive'
+
+    ``mode`` reflects the physics of the event. A change of collection geometry -- refocus,
+    sample movement, sensor re-seat -- *scales* every channel, so it is corrected
+    multiplicatively; subtracting a fixed amount from a signal that is itself drifting would
+    distort the whole record after the event. Use 'additive' only for something that adds a
+    constant, such as a change in ambient light.
+
+    Returns
+    -------
+    list of dict or None
+        Each dict has 'datetime', 'description' and 'mode'.
+    """
+    events = config.get('baseline_events')
+    if not events or not isinstance(events, list):
+        return None
+
+    parsed = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_str = event.get('datetime')
+        if not event_str:
+            continue
+        event_datetime = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                event_datetime = datetime.strptime(str(event_str), fmt)
+                break
+            except ValueError:
+                continue
+        if event_datetime is None:
+            print(f"Warning: Could not parse baseline event datetime '{event_str}'. "
+                  f"Expected 'YYYY-MM-DD HH:MM:SS'")
+            continue
+        mode = str(event.get('mode', 'multiplicative')).lower()
+        if mode not in ('multiplicative', 'additive'):
+            print(f"Warning: unknown baseline event mode '{mode}'; using 'multiplicative'")
+            mode = 'multiplicative'
+
+        parsed.append({
+            'datetime': event_datetime,
+            'description': event.get('description', ''),
+            'mode': mode,
+        })
+
+    return parsed if parsed else None
 
 
 def parse_treatment_events_config(config):

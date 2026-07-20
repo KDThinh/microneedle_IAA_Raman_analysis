@@ -17,8 +17,13 @@ from .core.loader import load_raman_dataset, load_temperature_data
 from .core.preprocessing import apply_savgol_filter
 from .core.baseline import lieberfit, apply_gaussian_smoothing
 from .core.utils import remove_spikes_hampel, correct_baseline_shifts, apply_corrections_at_jump_indices, smooth_signal
+from .core.transition_baseline import (detect_transition_ramps, slow_component_baseline,
+                                       fixed_stitch_baseline, classify_regions,
+                                       stitch_classified, stitch_channel_gated,
+                                       apply_declared_steps, snap_event_index)
+from .core.utils import parse_baseline_events_config
 from .analysis.peaks import find_peak_lorentzian
-from .analysis.ratios import calculate_ratios
+from .analysis.ratios import calculate_ratios, add_raw_columns
 from .analysis.fourier import compute_fourier_transform, compute_diurnal_average
 from .io.config import load_profile_config
 from .io.exporter import export_results, export_fft_results, load_processed_data
@@ -142,7 +147,11 @@ class RamanPipeline:
         else:
             self.results = self._process_v3()
         print(f"  Processed {len(self.results)} scans")
-        
+
+        # Recover the raw (un-normalized) channels up front so the baseline correction,
+        # the comparison plots, and the export all have them available.
+        self.results = add_raw_columns(self.results)
+
         # 2a. Apply signal corrections (spike removal and baseline correction) for v4
         if self.algorithm == 'v4':
             print("Applying signal corrections (spike removal and baseline correction)...")
@@ -344,6 +353,382 @@ class RamanPipeline:
         
         return df
     
+    def _median_scan_interval_seconds(self, df: pd.DataFrame) -> float:
+        """Median seconds between scans, falling back to 5 min if it cannot be determined."""
+        dt_seconds = None
+        if 'Seconds' in df.columns and len(df) > 1:
+            diffs = np.diff(np.asarray(df['Seconds'].values, dtype=float))
+            diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+            if len(diffs) > 0:
+                dt_seconds = float(np.median(diffs))
+        if dt_seconds is None and isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
+            deltas = np.diff(df.index.values).astype('timedelta64[s]').astype(float)
+            deltas = deltas[deltas > 0]
+            if len(deltas) > 0:
+                dt_seconds = float(np.median(deltas))
+        if not dt_seconds or dt_seconds <= 0:
+            dt_seconds = 300.0
+        return dt_seconds
+
+    def _scans_per_window(self, df: pd.DataFrame, hours: float) -> int:
+        """Convert a duration in hours to a number of scans using the median sampling interval."""
+        dt_seconds = None
+        if 'Seconds' in df.columns and len(df) > 1:
+            diffs = np.diff(np.asarray(df['Seconds'].values, dtype=float))
+            diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+            if len(diffs) > 0:
+                dt_seconds = float(np.median(diffs))
+        if dt_seconds is None and isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
+            deltas = np.diff(df.index.values).astype('timedelta64[s]').astype(float)
+            deltas = deltas[deltas > 0]
+            if len(deltas) > 0:
+                dt_seconds = float(np.median(deltas))
+        if not dt_seconds or dt_seconds <= 0:
+            dt_seconds = 300.0  # fall back to 5 min/scan
+        window = int(round(hours * 3600.0 / dt_seconds))
+        if window % 2 == 0:
+            window += 1  # odd window for a centered median
+        return max(3, window)
+
+    def _declared_event_positions(self, df: pd.DataFrame) -> list:
+        """Positional indices of declared baseline events, nearest scan to each timestamp."""
+        events = parse_baseline_events_config(self.config)
+        if not events:
+            return []
+
+        if isinstance(df.index, pd.DatetimeIndex):
+            stamps = df.index
+        elif 'Datetime' in df.columns:
+            stamps = pd.to_datetime(df['Datetime'], errors='coerce')
+        else:
+            logger.warning("Declared baseline events ignored: no datetime available")
+            return []
+
+        # Use Timestamp arithmetic rather than raw integer views: pandas >=3 stores datetimes at
+        # microsecond resolution while Timestamp.value is nanoseconds, and mixing the two silently
+        # scales the gap by 1000 (every event then looks decades away and is skipped).
+        index = pd.DatetimeIndex(stamps)
+        positions = []
+        for event in events:
+            target = pd.Timestamp(event['datetime'])
+            offsets = np.abs((index - target).total_seconds().to_numpy())
+            if not np.isfinite(offsets).any():
+                continue
+            pos = int(np.nanargmin(offsets))
+            gap_minutes = offsets[pos] / 60.0
+            if gap_minutes > 60.0:
+                logger.warning(f"  Declared event {event['datetime']} is {gap_minutes:.0f} min "
+                               f"from the nearest scan; skipping")
+                continue
+            positions.append((pos, event.get('mode', 'multiplicative')))
+            logger.info(f"  Declared baseline event at {event['datetime']} "
+                        f"-> scan position {pos} [{event.get('mode', 'multiplicative')}] "
+                        f"({event.get('description', '')})")
+        return positions
+
+    def _apply_transition_stitch_corrections(self, df: pd.DataFrame) -> tuple:
+        """
+        Baseline-correct by removing lighting-transition steps (stitch) with drift removal.
+
+        Fluorescence (which carries the lighting artifact) is spike-cleaned, then its
+        transition ramps are detected and stitched out with the accumulated drift removed,
+        preserving the daily biology. The Raman peak areas (G-band, 850) carry no lighting
+        artifact, so they are only spike-cleaned and lightly smoothed (never stitched),
+        which keeps the ratio denominator strictly positive.
+
+        ``stitch_space`` selects which channels are corrected:
+          'raw' (default) - correct the raw (un-normalized) channels. The per-scan
+              background carries its own day/night pattern, so correcting the normalized
+              fluorescence while dividing by an un-stitched normalized denominator breaks
+              the background's cancellation and injects a daytime artifact into the ratio.
+              Raw space avoids that; the resulting ratio is exactly scale-invariant across
+              datasets, since a dataset-wide brightness factor cancels in the ratio.
+          'normalized' - correct the normalized channels (previous behaviour).
+
+        Transition detection always runs on the normalized fluorescence, whose scale is
+        dataset-independent, so the detection thresholds mean the same thing in either mode.
+
+        Returns
+        -------
+        tuple
+            (df_corrected, jump_info_dict, spike_info_dict, df_after_spikes)
+        """
+        config = self.config
+        processing_cfg = config.get('processing', {}) or config.get('sections', {}).get('processing', {})
+
+        def get_param(nested_key, top_key=None, default=None):
+            if top_key is None:
+                top_key = nested_key
+            if nested_key in processing_cfg:
+                return processing_cfg[nested_key]
+            if top_key in config:
+                return config[top_key]
+            return default
+
+        candidate_sigma = float(get_param('transition_candidate_sigma', default=6.0))
+        drift_window_hours = float(get_param('stitch_drift_window_hours', default=24.0))
+
+        # Detection thresholds are expressed in TIME and as a FRACTION OF SIGNAL LEVEL, so a
+        # single setting ports across datasets. Scan-based / absolute-intensity thresholds do
+        # not: sampling intervals differ between runs (1-5 min here), which changes both how
+        # much of a ramp a scan-window spans and what a per-scan rate means; and the artifact
+        # size varies with the signal level. Absolute equivalents may still be set per profile
+        # to override, in which case they win.
+        slope_halfwindow_minutes = float(get_param('transition_slope_halfwindow_minutes', default=25.0))
+        min_displacement_pct = float(get_param('transition_min_displacement_pct', default=0.03))
+        min_rate_pct_per_hour = float(get_param('transition_min_rate_pct_per_hour', default=0.05))
+        override_halfwindow = get_param('transition_slope_halfwindow_scans')
+        override_displacement = get_param('transition_min_displacement')
+        override_rate = get_param('transition_min_rate_per_scan')
+
+        interval_minutes = self._median_scan_interval_seconds(df) / 60.0
+
+        # Windows used to measure a step's before/after level. Time-based for the same reason as
+        # the detection thresholds: a fixed number of scans spans very different durations at
+        # 1 vs 5 min sampling, and too short a window measures a transient rather than the level.
+        step_guard_minutes = float(get_param('step_guard_minutes', default=10.0))
+        step_level_window_minutes = float(get_param('step_level_window_minutes', default=30.0))
+        guard_scans = max(1, int(round(step_guard_minutes / interval_minutes)))
+        level_window_scans = max(2, int(round(step_level_window_minutes / interval_minutes)))
+        spike_window = int(get_param('spike_window', default=5))
+        spike_threshold = float(get_param('spike_threshold', default=3.0))
+        spike_max_length = int(get_param('spike_max_length', default=5))
+        denom_smooth_scans = int(get_param('denominator_smooth_scans', default=7))
+
+        drift_window_scans = self._scans_per_window(df, drift_window_hours)
+        logger.info(f"Transition-stitch baseline: drift window = {drift_window_hours} h "
+                    f"({drift_window_scans} scans)")
+
+        # Space to correct in: 'raw' (physical, recommended) or 'normalized' (per-scan
+        # background-divided). Detection always runs on the normalized fluorescence so the
+        # transition thresholds are scale-invariant across datasets; only the reconstruction
+        # differs. Raw space avoids injecting the background's day/night pattern into the ratio.
+        stitch_space = str(get_param('stitch_space', default='raw')).lower()
+        bg_col = 'Average_Background_Intensity_250_1250_cm-1'
+        if stitch_space == 'raw' and bg_col not in df.columns:
+            logger.warning("stitch_space='raw' needs the background column; falling back to 'normalized'")
+            stitch_space = 'normalized'
+        logger.info(f"Transition-stitch baseline: space = {stitch_space}")
+
+        fluor_norm = 'Normalized_Fluorescence_Intensity'
+        peak_norms = [c for c in ('Normalized_Gband_Area', 'Normalized_Raman_Peak_850_Area')
+                      if c in df.columns]
+
+        df_corrected = df.copy()
+        df_after_spikes = df.copy()
+        jump_info_dict = {}
+        spike_info_dict = {}
+
+        def despike(values):
+            """Hampel spike removal on the non-NaN entries; returns (cleaned_full, spike_idx)."""
+            arr = np.asarray(values, dtype=float)
+            mask = ~np.isnan(arr)
+            cleaned_full = arr.copy()
+            spike_idx = np.array([], dtype=int)
+            if mask.sum() > 2 * spike_window + 1:
+                cleaned, spike_mask = remove_spikes_hampel(
+                    arr[mask], window_size=spike_window, threshold=spike_threshold,
+                    max_spike_length=spike_max_length,
+                )
+                cleaned_full[mask] = cleaned
+                valid_idx = np.where(mask)[0]
+                spike_idx = valid_idx[spike_mask] if np.any(spike_mask) else np.array([], dtype=int)
+            return cleaned_full, spike_idx
+
+        # Resolve the working columns for the chosen space. For 'raw', build the physical
+        # channels (Normalized x per-scan background) and correct those.
+        if stitch_space == 'raw':
+            bg = df[bg_col].values.astype(float)
+            fluor_work = 'Raw_Fluorescence_Intensity'
+            df_corrected[fluor_work] = df[fluor_norm].values * bg if fluor_norm in df.columns else np.nan
+            peak_work = []
+            for nc in peak_norms:
+                rc = nc.replace('Normalized_', 'Raw_')
+                df_corrected[rc] = df[nc].values * bg
+                peak_work.append(rc)
+            fluor_values = df_corrected[fluor_work].values
+            peak_values = {rc: df_corrected[rc].values for rc in peak_work}
+        else:
+            fluor_work = fluor_norm
+            peak_work = list(peak_norms)
+            fluor_values = df[fluor_norm].values if fluor_norm in df.columns else None
+            peak_values = {nc: df[nc].values for nc in peak_norms}
+
+        # Declared one-off baseline events (refocus, sample movement). These shift the level
+        # permanently and are corrected on every channel, unlike lighting transitions which
+        # only affect the fluorescence.
+        declared_positions = self._declared_event_positions(df)
+        declared_snapped = []
+        event_search_scans = max(1, self._scans_per_window(df, 0.5))  # snap within +/- 30 min
+
+        # Fluorescence numerator: detect on normalized, stitch in the working space.
+        regions, recurring, oneoff = [], [], []
+        if fluor_norm in df.columns:
+            nf_clean, _ = despike(df[fluor_norm].values)
+
+            # Resolve the relative thresholds against this dataset's sampling rate and level.
+            level = float(np.nanmedian(np.abs(nf_clean))) if np.isfinite(nf_clean).any() else 1.0
+            slope_halfwindow = (int(override_halfwindow) if override_halfwindow is not None
+                                else max(2, int(round(slope_halfwindow_minutes / interval_minutes))))
+            min_displacement = (float(override_displacement) if override_displacement is not None
+                                else min_displacement_pct * level)
+            min_rate_per_scan = (float(override_rate) if override_rate is not None
+                                 else min_rate_pct_per_hour * level * (interval_minutes / 60.0))
+            logger.info(f"  Detection: interval={interval_minutes:.1f} min, level={level:.0f}, "
+                        f"slope_halfwindow={slope_halfwindow} scans, "
+                        f"min_displacement={min_displacement:.0f}, "
+                        f"min_rate_per_scan={min_rate_per_scan:.1f}")
+
+            regions = detect_transition_ramps(
+                nf_clean,
+                slope_halfwindow=slope_halfwindow,
+                candidate_sigma=candidate_sigma,
+                min_displacement=min_displacement,
+                min_rate_per_scan=min_rate_per_scan,
+            )
+            logger.info(f"  Detected {len(regions)} transition ramp(s) on {fluor_norm}")
+
+            wf_clean, wf_spikes = despike(fluor_values)
+            df_after_spikes[fluor_work] = wf_clean
+            spike_info_dict[fluor_work] = {'spike_indices': wf_spikes}
+            if len(wf_spikes) > 0:
+                logger.info(f"  Removed {len(wf_spikes)} spike(s) from {fluor_work}")
+
+            # NOTE: automatic recurring-vs-one-off classification is not wired in. Two approaches
+            # were tried and both misclassify: pairing steps by magnitude breaks when morning and
+            # evening steps are asymmetric, and testing persistence one cycle later is confounded
+            # by a multi-day trend. Every step is therefore drift-removed, which is correct for
+            # daily lighting transitions; genuine one-off shifts (e.g. refocus events) are left
+            # uncorrected rather than risk ratcheting the signal. See classify_regions().
+            corrected_fluor = fixed_stitch_baseline(
+                wf_clean, regions, drift_window_scans,
+                guard=guard_scans, level_window=level_window_scans)
+
+            # Declared one-off events are permanent, so they are applied after (and not subject
+            # to) the drift-removed transition stitch.
+            if declared_positions:
+                snapped = [(snap_event_index(corrected_fluor, pos, event_search_scans,
+                                             level_window_scans), mode)
+                           for pos, mode in declared_positions]
+                for want_mult in (True, False):
+                    idxs = [i for i, mode in snapped
+                            if (mode == 'multiplicative') is want_mult]
+                    if idxs:
+                        corrected_fluor = apply_declared_steps(
+                            corrected_fluor, idxs, guard=guard_scans,
+                            level_window=level_window_scans, multiplicative=want_mult)
+                declared_snapped = snapped
+                logger.info(f"  Applied {len(snapped)} declared step correction(s) to "
+                            f"{fluor_work}")
+            df_corrected[fluor_work + '_BaselineCorrected'] = corrected_fluor
+            jump_info_dict[fluor_work] = {
+                'jump_indices': np.array([a for (a, b) in regions], dtype=int),
+                'jump_info': [],
+            }
+        else:
+            logger.warning(f"Reference column '{fluor_norm}' not found; no transitions detected")
+
+        # Denominator channels (Raman peak areas): despike + light smooth, then correct only at
+        # the shared regions where this channel itself steps (lighting transitions leave the peak
+        # areas flat; focus/movement events do not). The correction is multiplicative, so a
+        # positive-definite area cannot be driven negative.
+        for wc in peak_work:
+            cleaned, spikes = despike(peak_values[wc])
+            df_after_spikes[wc] = cleaned
+            spike_info_dict[wc] = {'spike_indices': spikes}
+            smoothed = pd.Series(cleaned).rolling(
+                max(1, denom_smooth_scans), center=True, min_periods=1).median().to_numpy()
+            # A declared event changes the collection geometry, so it steps the peak areas too.
+            # Corrected multiplicatively: an area scales rather than shifts, and cannot go negative.
+            if declared_snapped:
+                mult_idxs = [i for i, mode in declared_snapped if mode == 'multiplicative']
+                if mult_idxs:
+                    smoothed = apply_declared_steps(
+                        smoothed, mult_idxs, guard=guard_scans,
+                        level_window=level_window_scans, multiplicative=True)
+                logger.info(f"  Applied {len(declared_snapped)} declared step correction(s) to {wc}")
+            df_corrected[wc + '_BaselineCorrected'] = smoothed
+            jump_info_dict[wc] = {'jump_indices': np.array([], dtype=int), 'jump_info': []}
+
+        return df_corrected, jump_info_dict, spike_info_dict, df_after_spikes
+
+    def _apply_transition_ramp_corrections(self, df: pd.DataFrame) -> tuple:
+        """
+        Baseline-correct by detecting lighting-transition ramps (rate of change),
+        masking them, and taking the slow component (rolling median over ~one light cycle).
+
+        Produces the same ``*_BaselineCorrected`` columns as the legacy method, so ratios,
+        FFT, and plotting are unchanged. Detection runs on the fluorescence reference
+        channel and the resulting ramp regions are shared to the other channels.
+
+        Returns
+        -------
+        tuple
+            (df_corrected, jump_info_dict, spike_info_dict, df_after_spikes)
+        """
+        config = self.config
+        processing_cfg = config.get('processing', {}) or config.get('sections', {}).get('processing', {})
+
+        def get_param(nested_key, top_key=None, default=None):
+            if top_key is None:
+                top_key = nested_key
+            if nested_key in processing_cfg:
+                return processing_cfg[nested_key]
+            if top_key in config:
+                return config[top_key]
+            return default
+
+        slope_halfwindow = int(get_param('transition_slope_halfwindow_scans', default=5))
+        candidate_sigma = float(get_param('transition_candidate_sigma', default=6.0))
+        min_displacement = float(get_param('transition_min_displacement', default=250.0))
+        min_rate_per_scan = float(get_param('transition_min_rate_per_scan', default=30.0))
+        slow_window_hours = float(get_param('slow_window_hours', default=24.0))
+
+        window_scans = self._scans_per_window(df, slow_window_hours)
+        logger.info(f"Transition-ramp baseline: slow window = {slow_window_hours} h "
+                    f"({window_scans} scans)")
+
+        reference_column = 'Normalized_Fluorescence_Intensity'
+        columns_to_correct = [
+            'Normalized_Fluorescence_Intensity',
+            'Normalized_Gband_Area',
+            'Normalized_Raman_Peak_850_Area',
+        ]
+
+        df_corrected = df.copy()
+        df_after_spikes = df.copy()  # no separate spike stage; keep raw for the 3-stage plot
+        jump_info_dict = {}
+        spike_info_dict = {}
+
+        # Detect transition ramps on the fluorescence reference channel.
+        regions = []
+        if reference_column in df.columns:
+            regions = detect_transition_ramps(
+                df[reference_column].values,
+                slope_halfwindow=slope_halfwindow,
+                candidate_sigma=candidate_sigma,
+                min_displacement=min_displacement,
+                min_rate_per_scan=min_rate_per_scan,
+            )
+            logger.info(f"  Detected {len(regions)} transition ramp(s) on {reference_column}")
+        else:
+            logger.warning(f"Reference column '{reference_column}' not found; no transitions detected")
+
+        region_start_indices = np.array([a for (a, b) in regions], dtype=int)
+
+        # Apply the slow-component baseline to every channel, sharing the detected regions.
+        for col in columns_to_correct:
+            if col not in df.columns:
+                logger.warning(f"Column '{col}' not found, skipping...")
+                continue
+            corrected = slow_component_baseline(df[col].values, regions, window_scans)
+            df_corrected[col + '_BaselineCorrected'] = corrected
+            # Report masked regions via the jump_info channels so existing plots still work.
+            jump_info_dict[col] = {'jump_indices': region_start_indices, 'jump_info': []}
+            spike_info_dict[col] = {'spike_indices': np.array([], dtype=int)}
+
+        return df_corrected, jump_info_dict, spike_info_dict, df_after_spikes
+
     def _apply_signal_corrections(self, df: pd.DataFrame) -> tuple:
         """
         Apply spike removal and baseline correction to specified columns.
@@ -377,7 +762,20 @@ class RamanPipeline:
             if top_key in config:
                 return config[top_key]
             return default
-        
+
+        # Dispatch on baseline method. All 'transition_*' methods share rate-of-change
+        # detection of lighting-transition ramps; they differ in reconstruction:
+        #   transition_stitch (default): remove the transition steps and the accumulated
+        #       drift, preserving the daily biology (real baseline correction).
+        #   transition_ramp: reconstruct as the slow component (median over ~1 day),
+        #       which removes all sub-daily variation.
+        # The legacy 'jump_stitch' path follows below.
+        baseline_method = str(get_param('baseline_correction_method', default='transition_stitch')).lower()
+        if baseline_method == 'transition_stitch':
+            return self._apply_transition_stitch_corrections(df)
+        if baseline_method == 'transition_ramp':
+            return self._apply_transition_ramp_corrections(df)
+
         spike_window = get_param('spike_window', default=5)
         spike_threshold = get_param('spike_threshold', default=3.0)
         spike_min_length = get_param('spike_min_length', default=1)
@@ -607,17 +1005,7 @@ class RamanPipeline:
                     correct_smoothed=baseline_correct_smoothed
                 )
                 jump_indices = jump_indices_valid_this_col
-            
-            # #region agent log
-            _log_path = Path(__file__).parent.parent / '.cursor' / 'debug.log'
-            _log_path.parent.mkdir(parents=True, exist_ok=True)
-            _max_diff_cleaned_corrected = np.nanmax(np.abs(corrected_signal - cleaned_signal)) if len(corrected_signal) == len(cleaned_signal) else -1
-            _are_identical_cleaned_corrected = np.allclose(corrected_signal, cleaned_signal, atol=1e-10) if len(corrected_signal) == len(cleaned_signal) else False
-            _step_changes = [j.get('step_change', 0) for j in jump_info] if jump_info else []
-            with open(_log_path, 'a') as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H1,H3", "location": f"{__file__}:405", "message": "pipeline: after correct_baseline_shifts", "data": {"column": col, "num_jumps": len(jump_indices), "max_diff_cleaned_vs_corrected": float(_max_diff_cleaned_corrected), "are_identical": bool(_are_identical_cleaned_corrected), "step_changes": [float(s) for s in _step_changes], "correct_smoothed": baseline_correct_smoothed, "cleaned_sample": cleaned_signal[:5].tolist() if len(cleaned_signal) >= 5 else cleaned_signal.tolist(), "corrected_sample": corrected_signal[:5].tolist() if len(corrected_signal) >= 5 else corrected_signal.tolist()}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
-            # #endregion
-            
+
             if len(jump_indices) > 0:
                 logger.info(f"  Detected {len(jump_indices)} baseline jump(s) in {col}")
             
@@ -642,18 +1030,7 @@ class RamanPipeline:
             # Create new column with _BaselineCorrected suffix (preserve original column)
             corrected_col_name = col + '_BaselineCorrected'
             df_corrected[corrected_col_name] = corrected_full
-            
-            # #region agent log
-            _log_path = Path(__file__).parent.parent / '.cursor' / 'debug.log'
-            _orig_vals = df_corrected[col].values[~np.isnan(df_corrected[col].values)]
-            _corr_vals = df_corrected[corrected_col_name].values[~np.isnan(df_corrected[corrected_col_name].values)]
-            _min_len = min(len(_orig_vals), len(_corr_vals)) if len(_orig_vals) > 0 and len(_corr_vals) > 0 else 0
-            _max_diff_df = np.nanmax(np.abs(_orig_vals[:_min_len] - _corr_vals[:_min_len])) if _min_len > 0 else -1
-            _are_identical_df = np.allclose(_orig_vals[:_min_len], _corr_vals[:_min_len], atol=1e-10) if _min_len > 0 else False
-            with open(_log_path, 'a') as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H3", "location": f"{__file__}:430", "message": "pipeline: after creating corrected column", "data": {"column": col, "corrected_col_name": corrected_col_name, "max_diff_df_columns": float(_max_diff_df), "are_identical_df": bool(_are_identical_df), "orig_sample": _orig_vals[:5].tolist() if len(_orig_vals) >= 5 else _orig_vals.tolist(), "corr_sample": _corr_vals[:5].tolist() if len(_corr_vals) >= 5 else _corr_vals.tolist()}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
-            # #endregion
-            
+
             # Original column remains unchanged (will be included in CSV export)
         
         return df_corrected, jump_info_dict, spike_info_dict, df_after_spikes
@@ -788,7 +1165,11 @@ class RamanPipeline:
         print("Loading processed data from CSV...")
         logger.info("Loading processed data from CSV...")
         self.results = load_processed_data(csv_path)
-        
+
+        # Recover the raw (un-normalized) channels so the baseline correction and export
+        # have them, even when re-processing a CSV written before they existed.
+        self.results = add_raw_columns(self.results)
+
         # Validate step dependencies after loading
         if 'ratios' in steps and ('spike_removal' not in steps or 'baseline_correction' not in steps):
             # Check if baseline-corrected columns already exist
@@ -1027,16 +1408,7 @@ class RamanPipeline:
         """Generate plots."""
         if self.results is None:
             return
-        
-        # #region agent log
-        _log_path = Path(__file__).parent.parent / '.cursor' / 'debug.log'
-        _log_path.parent.mkdir(parents=True, exist_ok=True)
-        _ratio_cols = [col for col in self.results.columns if 'Ratio' in col]
-        _baseline_corrected_cols = [col for col in self.results.columns if 'BaselineCorrected' in col]
-        with open(_log_path, 'a') as f:
-            f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "H5", "location": f"{__file__}:561", "message": "pipeline: _plot_results - checking columns", "data": {"all_columns": list(self.results.columns), "ratio_columns": _ratio_cols, "baseline_corrected_columns": _baseline_corrected_cols, "num_ratio_cols": len(_ratio_cols), "num_baseline_corrected_cols": len(_baseline_corrected_cols)}, "timestamp": int(datetime.now().timestamp() * 1000)}) + '\n')
-        # #endregion
-        
+
         # Plot ratio timeseries
         ratio_cols = [col for col in self.results.columns if 'Ratio' in col]
         for col in ratio_cols:
