@@ -37,10 +37,10 @@ their coordinates are in full-image space and the masks share the raw image dime
 
 USAGE
 -------------------------------------------------------------------------------------------
-  python stem_height_analysis_v2.py --calibrate --apply        # fit then run full series
-  python stem_height_analysis_v2.py --apply                    # run with saved calibration
-  python stem_height_analysis_v2.py --calibrate                # just (re)fit calibration
-  python stem_height_analysis_v2.py --apply --estimated-height-dir   # also save per-frame PNGs
+  python scripts/stem_height_analysis_v2.py --calibrate --apply        # fit then run full series
+  python scripts/stem_height_analysis_v2.py --apply                    # run with saved calibration
+  python scripts/stem_height_analysis_v2.py --calibrate                # just (re)fit calibration
+  python scripts/stem_height_analysis_v2.py --apply --estimated-height-dir   # also save per-frame PNGs
 
 Outputs under  <DEVICE_DIR>/stem_height_analysis_v2/ :
   stem_height_calibration.json
@@ -63,7 +63,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-_REPO = Path(__file__).resolve().parent
+_REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 from plant_timelapse import plant_contour_v3 as v3

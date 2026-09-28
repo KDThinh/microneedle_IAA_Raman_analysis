@@ -35,11 +35,11 @@ Run with no arguments for an interactive menu:
     [3] ANNOTATE frames now (pop-up clicker), then calibrate and run
 
 Or non-interactively:
-    python stem_height_analysis.py --annotate --samples 15   # pop-up clicker to label frames
-    python stem_height_analysis.py --calibrate               # build & save calibration
-    python stem_height_analysis.py --apply                   # run using saved calibration
-    python stem_height_analysis.py --calibrate --apply       # both
-    python stem_height_analysis.py --calibrate --px-per-mm 12.5   # set physical scale
+    python scripts/stem_height_analysis.py --annotate --samples 15   # pop-up clicker to label frames
+    python scripts/stem_height_analysis.py --calibrate               # build & save calibration
+    python scripts/stem_height_analysis.py --apply                   # run using saved calibration
+    python scripts/stem_height_analysis.py --calibrate --apply       # both
+    python scripts/stem_height_analysis.py --calibrate --px-per-mm 12.5   # set physical scale
 
 Interactive annotation (--annotate): pops up N evenly-spaced frames; on the FIRST frame
 you click base then apex, on the rest you click the apex only (base is reused).  The view

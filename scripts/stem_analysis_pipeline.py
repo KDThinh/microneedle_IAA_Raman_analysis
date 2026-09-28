@@ -7,6 +7,9 @@ Merges the approaches from:
   _tmp_freq_fill.py         (temporal frequency-voting gap repair)
   _tmp_graph_filter_demo.py (skeleton graph-level branch filtering)
 
+Both source scripts were removed once merged here; see archive/README.md for the
+git refs if you need to consult the originals.
+
 PIPELINE (per frame)
 --------------------
   1. Frequency-fill temporal gaps      sliding-window voting (±WINDOW_HALF frames)
